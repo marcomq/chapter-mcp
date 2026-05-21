@@ -15,7 +15,7 @@ class SentenceTransformerEmbedder:
         self._model = None
 
     @property
-    def model(self):
+    def model(self) -> "SentenceTransformer":
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 

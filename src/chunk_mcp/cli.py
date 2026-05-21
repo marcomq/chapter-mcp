@@ -36,11 +36,29 @@ def main() -> None:
         action="store_true",
         help="Disable automatic background reindexing.",
     )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Disable startup embedding warmup when --vector is enabled.",
+    )
+    parser.add_argument(
+        "--sync-startup",
+        action="store_true",
+        help="Run startup indexing before accepting MCP connections.",
+    )
+    parser.add_argument(
+        "--vector",
+        action="store_true",
+        help="Enable semantic vector search with sentence-transformers and sqlite-vec. Defaults to FTS5 search.",
+    )
     args = parser.parse_args()
     app = create_app(
         root=args.root,
         db_path=args.db,
         paths=args.paths,
+        vector=args.vector,
+        async_startup=not args.sync_startup,
+        warmup=not args.no_warmup,
         watch=not args.no_watch,
         watch_interval=args.watch_interval,
     )

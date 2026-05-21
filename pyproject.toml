@@ -4,11 +4,23 @@ version = "0.1.0"
 description = "A structure-aware semantic file search MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [{name = "Marco Mengelkoch"}]
+license = {text = "MIT"}
+keywords = ["mcp", "search", "semantic", "chunking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+]
 dependencies = [
     "fastmcp>=2.0.0",
     "sentence-transformers>=3.0.0",
     "sqlite-vec>=0.1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/marcomq/chunk-mcp"
+Repository = "https://github.com/marcomq/chunk-mcp"
 
 [project.scripts]
 chunk-mcp = "chunk_mcp.cli:main"
