@@ -39,7 +39,6 @@ Use `category=folder` to set the category name explicitly:
 
 ```sh
 uv run chunk-mcp --path memory=.serena/memories
-uv run chunk-mcp --path memory=~/bin/chunk-mcp/.serena/memories
 ```
 
 By default the server uses the current working directory as the root and writes
