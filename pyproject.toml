@@ -1,0 +1,27 @@
+[project]
+name = "chunk-mcp"
+version = "0.1.0"
+description = "A structure-aware semantic file search MCP server."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "sentence-transformers>=3.0.0",
+    "sqlite-vec>=0.1.0",
+]
+
+[project.scripts]
+chunk-mcp = "chunk_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
