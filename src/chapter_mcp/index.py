@@ -9,7 +9,9 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any
+
+from typing_extensions import NotRequired, TypedDict
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
 
