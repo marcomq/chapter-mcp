@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from fastmcp import FastMCP
 
-from chapter_mcp.index import CategoryPath, ChapterIndex
+from chapter_mcp.index import (
+    CategoryPath,
+    ChapterIndex,
+    FileListResponse,
+    IndexStatsDict,
+    ReadChapterResponse,
+    SearchResponse,
+    StatsResponse,
+    ChapterListResponse,
+)
 
 
 def create_app(
@@ -18,6 +26,7 @@ def create_app(
     watch: bool = True,
     watch_interval: float = 1.0,
 ) -> FastMCP:
+    """Create a FastMCP app wired to a ChapterIndex and the standard search/list/reindex tools."""
     root_path = (root or Path.cwd()).expanduser().resolve()
     database_path = db_path or root_path / ".chapter-mcp" / "index.sqlite3"
     chapter_index = ChapterIndex(root_path, database_path, paths)
@@ -31,12 +40,12 @@ def create_app(
     mcp = FastMCP(name="chapter-mcp")
 
     @mcp.tool
-    def search(query: str, category: str | None = None, limit: int = 1, offset: int = 0) -> dict[str, Any]:
+    def search(query: str, category: str | None = None, limit: int = 1, offset: int = 0) -> SearchResponse:
         """Search indexed chapter content."""
         return chapter_index.search(query=query, category=category, limit=limit, offset=offset)
 
     @mcp.tool
-    def search_chapter(query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> dict[str, Any]:
+    def search_chapter(query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> SearchResponse:
         """Search indexed chapter names only."""
         return chapter_index.search_chapter(query=query, category=category, limit=limit, offset=offset)
 
@@ -47,7 +56,7 @@ def create_app(
         category: str | None = None,
         count: int = 5,
         offset: int = 0,
-    ) -> dict[str, Any]:
+    ) -> ReadChapterResponse:
         """Read chapters by exact chapter name, optionally narrowed by file and category."""
         return chapter_index.read_chapter(
             chapter_name=chapter_name,
@@ -63,22 +72,22 @@ def create_app(
         file: str | None = None,
         count: int = 5,
         offset: int = 0,
-    ) -> dict[str, Any]:
+    ) -> ChapterListResponse:
         """List indexed chapter names and line ranges without chapter content."""
         return chapter_index.list_chapters(category=category, file=file, count=count, offset=offset)
 
     @mcp.tool
-    def list_files(category: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_files(category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
         """List indexed files and their index metadata."""
         return chapter_index.list_files(category=category, limit=limit, offset=offset)
 
     @mcp.tool
-    def stats() -> dict[str, Any]:
+    def stats() -> StatsResponse:
         """Return index totals and configured category status."""
         return chapter_index.stats()
 
     @mcp.tool
-    def reindex(category: str | None = None) -> dict[str, int]:
+    def reindex(category: str | None = None) -> IndexStatsDict:
         """Re-scan indexed folders and update changed files."""
         return chapter_index.reindex(category=category).as_dict()
 

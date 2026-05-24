@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
 
@@ -19,6 +19,94 @@ logger = logging.getLogger(__name__)
 CategoryPath = Path | str | tuple[str, Path | str]
 
 
+class IndexStatsDict(TypedDict):
+    scanned: int
+    indexed: int
+    skipped: int
+    deleted: int
+
+
+class IndexingSummaryDict(TypedDict):
+    chapters_loaded: int
+    indexing_time_seconds: float
+
+
+class ChapterRecord(TypedDict):
+    file: str
+    category: str
+    type: str
+    chapter_name: str
+    start_line: int
+    end_line: int
+    content: NotRequired[str]
+    score: NotRequired[float]
+
+
+class FileRecord(TypedDict):
+    file: str
+    category: str
+    mtime_ns: int
+    mtime: str | None
+    byte_count: int
+    line_count: int
+    chunk_count: int
+    indexed_at: str | None
+
+
+class SearchResponse(TypedDict):
+    count: int
+    results: list[ChapterRecord]
+
+
+class ChapterListResponse(TypedDict):
+    count: int
+    offset: int
+    chapters: list[ChapterRecord]
+
+
+class ReadChapterResponse(TypedDict):
+    count: int
+    chapters: list[ChapterRecord]
+
+
+class FileListResponse(TypedDict):
+    count: int
+    limit: int
+    offset: int
+    files: list[FileRecord]
+
+
+class CategoryStats(TypedDict):
+    path: str
+    exists: bool
+    file_count: int
+    chunk_count: int
+    byte_count: int
+    line_count: int
+    latest_mtime_ns: int | None
+    latest_mtime: str | None
+    latest_indexed_at: str | None
+
+
+class StatsResponse(TypedDict):
+    root: str
+    db_path: str
+    watching: bool
+    indexing: bool
+    startup_index_running: bool
+    last_reindex: IndexStatsDict | None
+    last_indexing_summary: IndexingSummaryDict | None
+    last_reindex_started_at: str | None
+    last_reindex_finished_at: str | None
+    last_background_error: str | None
+    category_count: int
+    file_count: int
+    chunk_count: int
+    byte_count: int
+    line_count: int
+    categories: dict[str, CategoryStats]
+
+
 @dataclass(frozen=True)
 class IndexStats:
     scanned: int = 0
@@ -26,7 +114,8 @@ class IndexStats:
     skipped: int = 0
     deleted: int = 0
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> IndexStatsDict:
+        """Return the counters as a small result dict for CLI or tool responses."""
         return {
             "scanned": self.scanned,
             "indexed": self.indexed,
@@ -35,6 +124,7 @@ class IndexStats:
         }
 
     def plus(self, *, scanned: int = 0, indexed: int = 0, skipped: int = 0, deleted: int = 0) -> "IndexStats":
+        """Return a new stats object with the provided counters added in."""
         return IndexStats(
             scanned=self.scanned + scanned,
             indexed=self.indexed + indexed,
@@ -48,13 +138,15 @@ class IndexingSummary:
     chapters_loaded: int = 0
     indexing_time_seconds: float = 0.0
 
-    def as_dict(self) -> dict[str, int | float]:
+    def as_dict(self) -> IndexingSummaryDict:
+        """Return a compact summary dict with chapter count and elapsed indexing time."""
         return {
             "chapters_loaded": self.chapters_loaded,
             "indexing_time_seconds": round(self.indexing_time_seconds, 6),
         }
 
     def plus(self, *, chapters_loaded: int = 0) -> "IndexingSummary":
+        """Return a new summary with additional loaded-chapter counts applied."""
         return IndexingSummary(
             chapters_loaded=self.chapters_loaded + chapters_loaded,
             indexing_time_seconds=self.indexing_time_seconds,
@@ -78,6 +170,7 @@ class ChapterIndex:
         db_path: Path,
         category_paths: Sequence[CategoryPath] | None = None,
     ) -> None:
+        """Create an index rooted at ``root`` and backed by the SQLite database at ``db_path``."""
         self.root = root.expanduser().resolve()
         db_path = db_path.expanduser()
         self.db_path = db_path if db_path.is_absolute() else self.root / db_path
@@ -98,12 +191,14 @@ class ChapterIndex:
         self._ensure_schema()
 
     def close(self) -> None:
+        """Stop background work and close the underlying SQLite connection."""
         self.stop_watcher()
         self.wait_for_startup(timeout=5)
         with self._lock:
             self.db.close()
 
     def start_background_reindex(self) -> None:
+        """Kick off startup indexing on a background thread if it is not already running."""
         if self._startup_thread is not None and self._startup_thread.is_alive():
             return
         self._startup_thread = threading.Thread(
@@ -114,11 +209,13 @@ class ChapterIndex:
         self._startup_thread.start()
 
     def wait_for_startup(self, timeout: float | None = None) -> None:
+        """Wait for any background startup indexing thread to finish."""
         thread = self._startup_thread
         if thread is not None:
             thread.join(timeout=timeout)
 
     def start_watcher(self, interval: float = 1.0) -> None:
+        """Start the background watcher that periodically reindexes changed files."""
         if interval <= 0:
             raise ValueError("watch interval must be greater than zero")
         if self._watch_thread is not None and self._watch_thread.is_alive():
@@ -133,6 +230,7 @@ class ChapterIndex:
         self._watch_thread.start()
 
     def stop_watcher(self) -> None:
+        """Stop the background watcher thread if one is running."""
         thread = self._watch_thread
         if thread is None:
             return
@@ -143,6 +241,7 @@ class ChapterIndex:
         self._watch_thread = None
 
     def reindex(self, category: str | None = None) -> IndexStats:
+        """Scan configured folders and update changed files, returning scan/index counters."""
         categories = self._selected_categories(category)
         stats = IndexStats()
         indexing_summary = IndexingSummary()
@@ -197,19 +296,22 @@ class ChapterIndex:
                 self._indexing = False
 
     def has_changes(self, category: str | None = None) -> bool:
+        """Return whether the live filesystem differs from what is currently indexed."""
         live_snapshot = self._filesystem_snapshot(category)
         with self._lock:
             indexed_snapshot = self._indexed_snapshot(category)
         return live_snapshot != indexed_snapshot
 
-    def search(self, query: str, category: str | None = None, limit: int = 1, offset: int = 0) -> dict[str, Any]:
+    def search(self, query: str, category: str | None = None, limit: int = 1, offset: int = 0) -> SearchResponse:
+        """Search chapter names and content and return a paginated result dict of matching chunks."""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
         return self._search_fts(query=query, category=category, limit=limit, offset=offset)
 
-    def search_chapter(self, query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> dict[str, Any]:
+    def search_chapter(self, query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> SearchResponse:
+        """Search chapter names only and return a paginated result dict of matching chunks."""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
@@ -223,7 +325,8 @@ class ChapterIndex:
         category: str | None = None,
         count: int = 5,
         offset: int = 0,
-    ) -> dict[str, Any]:
+    ) -> ReadChapterResponse:
+        """Return full chapter records for an exact chapter name, optionally narrowed by file or category."""
         count = max(1, min(count, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
@@ -260,7 +363,8 @@ class ChapterIndex:
         file: str | None = None,
         count: int = 5,
         offset: int = 0,
-    ) -> dict[str, Any]:
+    ) -> ChapterListResponse:
+        """List indexed chapters with names, files, and line ranges but without full content."""
         count = max(1, min(count, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
@@ -292,7 +396,8 @@ class ChapterIndex:
                 "chapters": [_chapter_row_to_result(row, include_content=False) for row in rows],
             }
 
-    def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
+        """List indexed files and return metadata such as category, size, and chunk counts."""
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         with self._lock:
@@ -330,9 +435,10 @@ class ChapterIndex:
                 "files": [_file_row_to_result(row) for row in rows],
             }
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> StatsResponse:
+        """Return overall index counts plus per-category status and recent indexing metadata."""
         with self._lock:
-            categories: dict[str, Any] = {}
+            categories: dict[str, CategoryStats] = {}
             total_files = 0
             total_chunks = 0
             total_bytes = 0
@@ -445,7 +551,7 @@ class ChapterIndex:
             with self._lock:
                 self._last_background_error = repr(error)
 
-    def _search_fts(self, query: str, category: str | None, limit: int, offset: int) -> dict[str, Any]:
+    def _search_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
         return self._search_fts_columns(
             query=query,
             category=category,
@@ -454,7 +560,7 @@ class ChapterIndex:
             match_column=None,
         )
 
-    def _search_chapter_fts(self, query: str, category: str | None, limit: int, offset: int) -> dict[str, Any]:
+    def _search_chapter_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
         return self._search_fts_columns(
             query=query,
             category=category,
@@ -471,7 +577,7 @@ class ChapterIndex:
         limit: int,
         offset: int,
         match_column: str | None,
-    ) -> dict[str, Any]:
+    ) -> SearchResponse:
         fts_query = _fts_query(query)
         match_expression = f"{match_column} : {fts_query}" if match_column is not None else fts_query
         with self._lock:
@@ -745,7 +851,7 @@ def _format_timestamp(timestamp: float | None) -> str | None:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
-def _file_row_to_result(row: sqlite3.Row) -> dict[str, Any]:
+def _file_row_to_result(row: sqlite3.Row) -> FileRecord:
     return {
         "file": row["path"],
         "category": row["category"],
@@ -758,8 +864,8 @@ def _file_row_to_result(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _chapter_row_to_result(row: sqlite3.Row, *, include_content: bool) -> dict[str, Any]:
-    result = {
+def _chapter_row_to_result(row: sqlite3.Row, *, include_content: bool) -> ChapterRecord:
+    result: ChapterRecord = {
         "file": row["file_path"],
         "category": row["category"],
         "type": row["chunk_type"],
@@ -774,5 +880,5 @@ def _chapter_row_to_result(row: sqlite3.Row, *, include_content: bool) -> dict[s
     return result
 
 
-def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_result(row: sqlite3.Row) -> ChapterRecord:
     return _chapter_row_to_result(row, include_content=True)
