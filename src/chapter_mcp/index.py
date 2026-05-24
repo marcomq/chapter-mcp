@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 import threading
@@ -12,6 +13,8 @@ from typing import Any
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
 
+
+logger = logging.getLogger(__name__)
 
 CategoryPath = Path | str | tuple[str, Path | str]
 
@@ -167,13 +170,10 @@ class ChapterIndex:
                         stats = stats.plus(skipped=1)
                         continue
 
+                    prepared = self._prepare_file(path, rel_path, selected)
                     file_record = self._read_file_record(path, rel_path, selected)
                     with self._lock:
                         self._write_file_record(file_record)
-                        self.db.commit()
-
-                    prepared = self._prepare_file(path, rel_path, selected)
-                    with self._lock:
                         self._write_prepared_chapters(prepared)
                         self.db.commit()
                     indexing_summary = indexing_summary.plus(chapters_loaded=len(prepared.chapters))
@@ -605,8 +605,11 @@ class ChapterIndex:
 
     def _watch_loop(self, interval: float) -> None:
         while not self._watch_stop.wait(interval):
-            if self.has_changes():
-                self.reindex()
+            try:
+                if self.has_changes():
+                    self.reindex()
+            except Exception:
+                logger.exception("watch loop failed while checking for changes or reindexing")
 
     def _filesystem_snapshot(self, category: str | None = None) -> dict[str, tuple[str, int, int]]:
         snapshot: dict[str, tuple[str, int, int]] = {}
@@ -668,7 +671,15 @@ class ChapterIndex:
                 raise ValueError(f"category path must name a directory: {configured_path}")
             if category in category_dirs:
                 raise ValueError(f"duplicate category name from path: {configured_path}")
-            category_dirs[category] = directory.resolve()
+            directory = directory.resolve()
+            for existing_category, existing_directory in category_dirs.items():
+                if directory == existing_directory or existing_directory in directory.parents or directory in existing_directory.parents:
+                    raise ValueError(
+                        "configured_path "
+                        f"{configured_path!r} for category {category!r} overlaps with "
+                        f"configured_paths entry for category {existing_category!r}: {directory} vs {existing_directory}"
+                    )
+            category_dirs[category] = directory
         return category_dirs
 
     def _selected_categories(self, category: str | None) -> tuple[str, ...]:

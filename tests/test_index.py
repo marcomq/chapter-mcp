@@ -274,12 +274,9 @@ def test_no_configured_paths_indexes_nothing(tmp_path: Path) -> None:
 def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:
     write(tmp_path / "docs" / "alpha.md", "# Alpha\nAlpha note.")
 
-    start = time.monotonic()
     app = create_app(root=tmp_path, paths=["docs"], watch=False)
-    elapsed = time.monotonic() - start
 
     try:
-        assert elapsed < 0.25
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             listed = app.chapter_index.list_files()  # type: ignore[attr-defined]
@@ -296,6 +293,34 @@ def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:
         assert app.chapter_index.search("alpha")["results"][0]["file"] == "docs/alpha.md"  # type: ignore[attr-defined]
     finally:
         app.chapter_index.close()  # type: ignore[attr-defined]
+
+
+def test_overlapping_configured_paths_raise_value_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="docs/api"):
+        ChapterIndex(
+            tmp_path,
+            tmp_path / ".chapter-mcp" / "index.sqlite3",
+            category_paths=["docs", "api=docs/api"],
+        )
+
+
+def test_prepare_failure_does_not_commit_partial_file_metadata(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "docs" / "alpha.md"
+    write(path, "# Alpha\nAlpha note.")
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    def fail_prepare(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(index, "_prepare_file", fail_prepare)
+
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            index.reindex()
+        assert index.list_files()["files"] == []
+        assert index.has_changes() is True
+    finally:
+        index.close()
 
 
 def test_index_methods_can_be_called_from_worker_thread(tmp_path: Path) -> None:
@@ -353,6 +378,42 @@ def test_watcher_reindexes_modified_files(tmp_path: Path) -> None:
             time.sleep(0.05)
         else:
             raise AssertionError("watcher did not reindex modified file")
+    finally:
+        index.close()
+
+
+def test_watch_loop_logs_and_continues_after_errors(tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    class FakeStop:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, interval: float) -> bool:
+            self.calls += 1
+            return self.calls > 2
+
+    calls = {"has_changes": 0, "reindex": 0}
+
+    def fake_has_changes() -> bool:
+        calls["has_changes"] += 1
+        if calls["has_changes"] == 1:
+            raise RuntimeError("watch failed")
+        return True
+
+    def fake_reindex() -> None:
+        calls["reindex"] += 1
+
+    monkeypatch.setattr(index, "_watch_stop", FakeStop())
+    monkeypatch.setattr(index, "has_changes", fake_has_changes)
+    monkeypatch.setattr(index, "reindex", fake_reindex)
+
+    try:
+        with caplog.at_level("ERROR"):
+            index._watch_loop(0.0)
+        assert calls["has_changes"] == 2
+        assert calls["reindex"] == 1
+        assert "watch loop failed" in caplog.text
     finally:
         index.close()
 

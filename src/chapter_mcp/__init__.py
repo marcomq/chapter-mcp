@@ -4,10 +4,10 @@ from chapter_mcp.index import ChapterIndex, IndexingSummary, IndexStats
 from chapter_mcp.server import create_app
 
 __all__ = [
-    "ChapterIndex",
-    "IndexingSummary",
-    "IndexStats",
     "__version__",
+    "ChapterIndex",
+    "IndexStats",
+    "IndexingSummary",
     "create_app",
 ]
 

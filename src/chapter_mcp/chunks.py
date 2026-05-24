@@ -33,6 +33,12 @@ TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+PYTHON_NODE_LABELS: dict[type[ast.AST], str] = {
+    ast.AsyncFunctionDef: "async function",
+    ast.ClassDef: "class",
+    ast.FunctionDef: "function",
+    ast.Module: "module",
+}
 
 
 def parse_file(path: Path, text: str) -> list[Chunk]:
@@ -109,7 +115,9 @@ def parse_python(text: str) -> list[Chunk]:
         start_line = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
         source = "\n".join(lines[start_line - 1 : node.end_lineno]).strip()
         docstring = ast.get_docstring(node)
-        content_parts = [f"{type(node).__name__} {node.name}"]
+        label = PYTHON_NODE_LABELS.get(type(node), type(node).__name__.lower())
+        name = getattr(node, "name", "<anon>")
+        content_parts = [f"{label} {name}"]
         if docstring:
             content_parts.append(docstring)
         content_parts.append(source)

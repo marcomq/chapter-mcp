@@ -14,6 +14,16 @@ def _configure_logging() -> None:
     logging.basicConfig(level=level)
 
 
+def _validate_positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}")
+    return parsed
+
+
 def main() -> None:
     _configure_logging()
     parser = argparse.ArgumentParser(description="Run the chapter-mcp chapter search server.")
@@ -36,7 +46,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--watch-interval",
-        type=float,
+        type=_validate_positive_float,
         default=1.0,
         help="Seconds between filesystem change checks. Defaults to 1.0.",
     )

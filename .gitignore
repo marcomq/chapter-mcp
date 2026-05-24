@@ -3,9 +3,14 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.coverage
 *.py[cod]
+*.egg-info/
 .serena
 .DS_Store
+build/
+dist/
+htmlcov/
 *.zip
 tldr-main/
 test/

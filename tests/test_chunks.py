@@ -53,9 +53,12 @@ def test_parse_python_functions_classes_and_docstrings() -> None:
 
     assert [chunk.name for chunk in chunks] == ["build", "fetch", "Runner"]
     assert chunks[0].chunk_type == "python_function"
+    assert chunks[0].content.startswith("function build")
     assert "Build docs." in chunks[0].content
     assert "@decorator" in chunks[0].content
+    assert chunks[1].content.startswith("async function fetch")
     assert chunks[2].chunk_type == "python_class"
+    assert chunks[2].content.startswith("class Runner")
     assert chunks[2].start_line == 11
     assert chunks[2].end_line == 14
 
