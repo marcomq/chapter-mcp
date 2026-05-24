@@ -1,6 +1,11 @@
+.chapter-mcp/
 .chunk-mcp/
 .venv/
 __pycache__/
 .pytest_cache/
 *.py[cod]
 .serena
+.DS_Store
+*.zip
+tldr-main/
+test/

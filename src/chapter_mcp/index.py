@@ -10,11 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chunk_mcp.chunks import Chunk, is_probably_text, parse_file
-from chunk_mcp.embeddings import Embedder
+from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
 
 
-EMBEDDING_DIMENSIONS = 384
 CategoryPath = Path | str | tuple[str, Path | str]
 
 
@@ -43,51 +41,57 @@ class IndexStats:
 
 
 @dataclass(frozen=True)
+class IndexingSummary:
+    chapters_loaded: int = 0
+    indexing_time_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, int | float]:
+        return {
+            "chapters_loaded": self.chapters_loaded,
+            "indexing_time_seconds": round(self.indexing_time_seconds, 6),
+        }
+
+    def plus(self, *, chapters_loaded: int = 0) -> "IndexingSummary":
+        return IndexingSummary(
+            chapters_loaded=self.chapters_loaded + chapters_loaded,
+            indexing_time_seconds=self.indexing_time_seconds,
+        )
+
+
+@dataclass(frozen=True)
 class PreparedFile:
     rel_path: str
     category: str
     mtime_ns: int
     size: int
     line_count: int
-    chunks: list[Chunk]
-    embeddings: list[list[float]] | None = None
+    chapters: list[Chunk]
 
 
-class ChunkIndex:
+class ChapterIndex:
     def __init__(
         self,
         root: Path,
         db_path: Path,
-        embedder: Embedder | None,
         category_paths: Sequence[CategoryPath] | None = None,
-        use_vector: bool = False,
     ) -> None:
         self.root = root.expanduser().resolve()
         db_path = db_path.expanduser()
         self.db_path = db_path if db_path.is_absolute() else self.root / db_path
-        self.embedder = embedder
-        self.use_vector = use_vector
         self.category_dirs = self._resolve_category_dirs(category_paths)
         self._lock = threading.RLock()
-        self._embed_lock = threading.Lock()
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._startup_thread: threading.Thread | None = None
         self._indexing = False
-        self._embedding_ready = False
         self._last_reindex_stats: IndexStats | None = None
+        self._last_indexing_summary: IndexingSummary | None = None
         self._last_reindex_started_at: float | None = None
         self._last_reindex_finished_at: float | None = None
         self._last_background_error: str | None = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        if self.use_vector:
-            import sqlite_vec
-
-            self.db.enable_load_extension(True)
-            sqlite_vec.load(self.db)
-            self.db.enable_load_extension(False)
         self._ensure_schema()
 
     def close(self) -> None:
@@ -96,13 +100,12 @@ class ChunkIndex:
         with self._lock:
             self.db.close()
 
-    def start_background_reindex(self, *, warmup: bool = False) -> None:
+    def start_background_reindex(self) -> None:
         if self._startup_thread is not None and self._startup_thread.is_alive():
             return
         self._startup_thread = threading.Thread(
             target=self._background_reindex,
-            kwargs={"warmup": warmup},
-            name="chunk-mcp-startup-index",
+            name="chapter-mcp-startup-index",
             daemon=True,
         )
         self._startup_thread.start()
@@ -121,7 +124,7 @@ class ChunkIndex:
         self._watch_thread = threading.Thread(
             target=self._watch_loop,
             args=(interval,),
-            name="chunk-mcp-index-watcher",
+            name="chapter-mcp-index-watcher",
             daemon=True,
         )
         self._watch_thread.start()
@@ -133,13 +136,13 @@ class ChunkIndex:
         self._watch_stop.set()
         thread.join(timeout=5)
         if thread.is_alive():
-            # Thread didn't stop in time; leave reference to prevent duplicate starts
             return
         self._watch_thread = None
 
     def reindex(self, category: str | None = None) -> IndexStats:
         categories = self._selected_categories(category)
         stats = IndexStats()
+        indexing_summary = IndexingSummary()
         seen_paths: set[str] = set()
         with self._lock:
             self._indexing = True
@@ -171,8 +174,9 @@ class ChunkIndex:
 
                     prepared = self._prepare_file(path, rel_path, selected)
                     with self._lock:
-                        self._write_prepared_chunks(prepared)
+                        self._write_prepared_chapters(prepared)
                         self.db.commit()
+                    indexing_summary = indexing_summary.plus(chapters_loaded=len(prepared.chapters))
                     stats = stats.plus(indexed=1)
 
             with self._lock:
@@ -180,6 +184,13 @@ class ChunkIndex:
                 self.db.commit()
                 self._last_reindex_stats = stats
                 self._last_reindex_finished_at = time.time()
+                self._last_indexing_summary = IndexingSummary(
+                    chapters_loaded=indexing_summary.chapters_loaded,
+                    indexing_time_seconds=max(
+                        0.0,
+                        (self._last_reindex_finished_at or time.time()) - (self._last_reindex_started_at or time.time()),
+                    ),
+                )
                 return stats
         finally:
             with self._lock:
@@ -191,56 +202,95 @@ class ChunkIndex:
             indexed_snapshot = self._indexed_snapshot(category)
         return live_snapshot != indexed_snapshot
 
-    def warmup(self) -> None:
-        if self.use_vector:
-            self._embed(["chunk-mcp warmup"])
-
     def search(self, query: str, category: str | None = None, limit: int = 1, offset: int = 0) -> dict[str, Any]:
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
-
-        if self.use_vector:
-            with self._lock:
-                count = self._count_chunks(category)
-                startup_running = self._startup_thread is not None and self._startup_thread.is_alive()
-                if startup_running and not self._embedding_ready:
-                    return {
-                        "count": count,
-                        "limit": limit,
-                        "offset": offset,
-                        "ready": False,
-                        "status": "indexing",
-                        "mode": "vector",
-                        "results": [],
-                    }
-            return self._search_vector(query=query, category=category, limit=limit, offset=offset, count=count)
-
         return self._search_fts(query=query, category=category, limit=limit, offset=offset)
 
-    def get_chunk(self, file: str, chunk_name: str) -> dict[str, Any]:
+    def search_chapter(self, query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> dict[str, Any]:
+        limit = max(1, min(limit, 100))
+        offset = max(0, offset)
+        if category is not None and category not in self.category_dirs:
+            raise ValueError(f"unknown category: {category}")
+        return self._search_chapter_fts(query=query, category=category, limit=limit, offset=offset)
+
+    def read_chapter(
+        self,
+        chapter_name: str,
+        file: str | None = None,
+        category: str | None = None,
+        count: int = 5,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        count = max(1, min(count, 100))
+        offset = max(0, offset)
+        if category is not None and category not in self.category_dirs:
+            raise ValueError(f"unknown category: {category}")
+        clauses = ["chunk_name = ?"]
+        params: list[Any] = [chapter_name]
+        if file is not None:
+            clauses.append("file_path = ?")
+            params.append(file)
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(category)
+        where = " and ".join(clauses)
         with self._lock:
-            row = self.db.execute(
-                """
-                select
-                    file_path,
-                    category,
-                    chunk_type,
-                    chunk_name,
-                    content,
-                    start_line,
-                    end_line
+            count_row = self.db.execute(f"select count(*) as count from chunks where {where}", params).fetchone()
+            rows = self.db.execute(
+                f"""
+                select file_path, category, chunk_type, chunk_name, content, start_line, end_line
                 from chunks
-                where file_path = ? and chunk_name = ?
+                where {where}
+                order by category, file_path, start_line
+                limit ? offset ?
                 """,
-                [file, chunk_name],
-            ).fetchone()
-            if row is None:
-                return {"found": False, "file": file, "chunk_name": chunk_name}
-            result = _row_to_result(row)
-            result["found"] = True
-            return result
+                [*params, count, offset],
+            ).fetchall()
+            return {
+                "count": count_row["count"] if count_row is not None else 0,
+                "chapters": [_row_to_result(row) for row in rows],
+            }
+
+    def list_chapters(
+        self,
+        category: str | None = None,
+        file: str | None = None,
+        count: int = 5,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        count = max(1, min(count, 100))
+        offset = max(0, offset)
+        if category is not None and category not in self.category_dirs:
+            raise ValueError(f"unknown category: {category}")
+        clauses: list[str] = []
+        params: list[Any] = []
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(category)
+        if file is not None:
+            clauses.append("file_path = ?")
+            params.append(file)
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        with self._lock:
+            count_row = self.db.execute(f"select count(*) as count from chunks {where}", params).fetchone()
+            rows = self.db.execute(
+                f"""
+                select file_path, category, chunk_type, chunk_name, start_line, end_line
+                from chunks
+                {where}
+                order by category, file_path, start_line
+                limit ? offset ?
+                """,
+                [*params, count, offset],
+            ).fetchall()
+            return {
+                "count": count_row["count"] if count_row is not None else 0,
+                "offset": offset,
+                "chapters": [_chapter_row_to_result(row, include_content=False) for row in rows],
+            }
 
     def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         limit = max(1, min(limit, 500))
@@ -329,10 +379,11 @@ class ChunkIndex:
                 "db_path": self.db_path.as_posix(),
                 "watching": self._watch_thread is not None and self._watch_thread.is_alive(),
                 "indexing": self._indexing,
-                "vector_enabled": self.use_vector,
-                "embedding_ready": self._embedding_ready,
                 "startup_index_running": self._startup_thread is not None and self._startup_thread.is_alive(),
                 "last_reindex": self._last_reindex_stats.as_dict() if self._last_reindex_stats is not None else None,
+                "last_indexing_summary": (
+                    self._last_indexing_summary.as_dict() if self._last_indexing_summary is not None else None
+                ),
                 "last_reindex_started_at": _format_timestamp(self._last_reindex_started_at),
                 "last_reindex_finished_at": _format_timestamp(self._last_reindex_finished_at),
                 "last_background_error": self._last_background_error,
@@ -379,16 +430,7 @@ class ChunkIndex:
                 create index if not exists idx_chunks_category on chunks(category);
                 """
             )
-            if self.use_vector:
-                self.db.execute(
-                    f"""
-                    create virtual table if not exists vec_chunks using vec0(
-                        embedding float[{EMBEDDING_DIMENSIONS}]
-                    )
-                    """
-                )
             self._ensure_file_columns()
-            self._ensure_fts_rows()
             self.db.commit()
 
     def _ensure_file_columns(self) -> None:
@@ -396,26 +438,42 @@ class ChunkIndex:
         if "line_count" not in columns:
             self.db.execute("alter table files add column line_count integer not null default 0")
 
-    def _ensure_fts_rows(self) -> None:
-        chunk_count = self.db.execute("select count(*) as count from chunks").fetchone()["count"]
-        if chunk_count == 0:
-            return
-        fts_count = self.db.execute("select count(*) as count from chunks_fts").fetchone()["count"]
-        if fts_count == chunk_count:
-            return
-        self.db.execute("insert into chunks_fts(chunks_fts) values ('rebuild')")
-
-    def _background_reindex(self, *, warmup: bool) -> None:
+    def _background_reindex(self) -> None:
         try:
             self.reindex()
-            if warmup:
-                self.warmup()
-        except Exception as error:  # pragma: no cover - defensive status plumbing
+        except Exception as error:  # pragma: no cover
             with self._lock:
                 self._last_background_error = repr(error)
 
     def _search_fts(self, query: str, category: str | None, limit: int, offset: int) -> dict[str, Any]:
+        return self._search_fts_columns(
+            query=query,
+            category=category,
+            limit=limit,
+            offset=offset,
+            match_column=None,
+        )
+
+    def _search_chapter_fts(self, query: str, category: str | None, limit: int, offset: int) -> dict[str, Any]:
+        return self._search_fts_columns(
+            query=query,
+            category=category,
+            limit=limit,
+            offset=offset,
+            match_column="chunk_name",
+        )
+
+    def _search_fts_columns(
+        self,
+        *,
+        query: str,
+        category: str | None,
+        limit: int,
+        offset: int,
+        match_column: str | None,
+    ) -> dict[str, Any]:
         fts_query = _fts_query(query)
+        match_expression = f"{match_column} : {fts_query}" if match_column is not None else fts_query
         with self._lock:
             count_row = self.db.execute(
                 """
@@ -425,7 +483,7 @@ class ChunkIndex:
                 where chunks_fts match ?
                   and (? is null or chunks.category = ?)
                 """,
-                [fts_query, category, category],
+                [match_expression, category, category],
             ).fetchone()
             rows = self.db.execute(
                 """
@@ -445,52 +503,11 @@ class ChunkIndex:
                 order by score
                 limit ? offset ?
                 """,
-                [fts_query, category, category, limit, offset],
+                [match_expression, category, category, limit, offset],
             ).fetchall()
             return {
                 "count": count_row["count"] if count_row is not None else 0,
-                "limit": limit,
-                "offset": offset,
-                "ready": True,
-                "status": "ready",
-                "mode": "fts",
                 "results": [_row_to_result(row) for row in rows],
-            }
-
-    def _search_vector(self, query: str, category: str | None, limit: int, offset: int, count: int) -> dict[str, Any]:
-        query_embedding = self._embed([query])[0]
-        with self._lock:
-            k = self._search_k(category, limit + offset)
-            from sqlite_vec import serialize_float32
-
-            rows = self.db.execute(
-                """
-                select
-                    chunks.file_path,
-                    chunks.category,
-                    chunks.chunk_type,
-                    chunks.chunk_name,
-                    chunks.content,
-                    chunks.start_line,
-                    chunks.end_line,
-                    vec_chunks.distance
-                from vec_chunks
-                join chunks on chunks.id = vec_chunks.rowid
-                where vec_chunks.embedding match ?
-                  and k = ?
-                  and (? is null or chunks.category = ?)
-                order by vec_chunks.distance
-                """,
-                [serialize_float32(query_embedding), k, category, category],
-            ).fetchall()
-            return {
-                "count": count,
-                "limit": limit,
-                "offset": offset,
-                "ready": True,
-                "status": "ready",
-                "mode": "vector",
-                "results": [_row_to_result(row) for row in rows[offset : offset + limit]],
             }
 
     def _read_file_record(self, path: Path, rel_path: str, category: str) -> PreparedFile:
@@ -505,26 +522,23 @@ class ChunkIndex:
             mtime_ns=stat.st_mtime_ns,
             size=stat.st_size,
             line_count=line_count,
-            chunks=[],
+            chapters=[],
         )
 
     def _prepare_file(self, path: Path, rel_path: str, category: str) -> PreparedFile:
         record = self._read_file_record(path, rel_path, category)
         text = path.read_text(encoding="utf-8")
-        chunks = parse_file(path, text)
-        embeddings = self._embed([_embedding_text(chunk) for chunk in chunks]) if self.use_vector and chunks else None
+        chapters = parse_file(path, text)
         return PreparedFile(
             rel_path=rel_path,
             category=category,
             mtime_ns=record.mtime_ns,
             size=record.size,
             line_count=record.line_count,
-            chunks=chunks,
-            embeddings=embeddings,
+            chapters=chapters,
         )
 
     def _write_file_record(self, prepared: PreparedFile) -> None:
-        self._delete_file_chunks(prepared.rel_path)
         self.db.execute(
             """
             insert into files(path, category, mtime_ns, size, line_count, indexed_at)
@@ -546,12 +560,13 @@ class ChunkIndex:
             ],
         )
 
-    def _write_prepared_chunks(self, prepared: PreparedFile) -> None:
+    def _write_prepared_chapters(self, prepared: PreparedFile) -> None:
+        self._delete_file_chunks(prepared.rel_path)
         self._write_file_record(prepared)
-        if not prepared.chunks:
+        if not prepared.chapters:
             return
 
-        for index, chunk in enumerate(prepared.chunks):
+        for chapter in prepared.chapters:
             cursor = self.db.execute(
                 """
                 insert into chunks(
@@ -567,42 +582,26 @@ class ChunkIndex:
                 [
                     prepared.rel_path,
                     prepared.category,
-                    chunk.chunk_type,
-                    chunk.name,
-                    chunk.content,
-                    chunk.start_line,
-                    chunk.end_line,
+                    chapter.chunk_type,
+                    chapter.name,
+                    chapter.content,
+                    chapter.start_line,
+                    chapter.end_line,
                 ],
             )
-            chunk_id = cursor.lastrowid
+            chapter_id = cursor.lastrowid
             self.db.execute(
                 """
                 insert into chunks_fts(rowid, chunk_name, content, file_path, category)
                 values (?, ?, ?, ?, ?)
                 """,
-                [chunk_id, chunk.name, chunk.content, prepared.rel_path, prepared.category],
+                [chapter_id, chapter.name, chapter.content, prepared.rel_path, prepared.category],
             )
-            if self.use_vector and prepared.embeddings is not None:
-                from sqlite_vec import serialize_float32
-
-                self.db.execute(
-                    "insert into vec_chunks(rowid, embedding) values (?, ?)",
-                    [chunk_id, serialize_float32(prepared.embeddings[index])],
-                )
 
     def _file_unchanged(self, rel_path: str, path: Path) -> bool:
         stat = path.stat()
         row = self.db.execute("select mtime_ns, size from files where path = ?", [rel_path]).fetchone()
         return row is not None and row["mtime_ns"] == stat.st_mtime_ns and row["size"] == stat.st_size
-
-    def _embed(self, texts: Sequence[str]) -> list[list[float]]:
-        if self.embedder is None:
-            raise RuntimeError("vector search is not enabled")
-        with self._embed_lock:
-            embeddings = self.embedder.encode(texts)
-            with self._lock:
-                self._embedding_ready = True
-            return embeddings
 
     def _watch_loop(self, interval: float) -> None:
         while not self._watch_stop.wait(interval):
@@ -633,18 +632,6 @@ class ChunkIndex:
         ).fetchall()
         return {row["path"]: (row["category"], row["mtime_ns"], row["size"]) for row in rows}
 
-    def _search_k(self, category: str | None, requested: int) -> int:
-        if category is None:
-            return requested
-        return max(requested, self._count_chunks())
-
-    def _count_chunks(self, category: str | None = None) -> int:
-        if category is None:
-            row = self.db.execute("select count(*) as count from chunks").fetchone()
-        else:
-            row = self.db.execute("select count(*) as count from chunks where category = ?", [category]).fetchone()
-        return row["count"] if row is not None else 0
-
     def _delete_removed_files(self, categories: Iterable[str], seen_paths: set[str]) -> int:
         deleted = 0
         selected_categories = list(categories)
@@ -666,8 +653,6 @@ class ChunkIndex:
         rows = self.db.execute("select id from chunks where file_path = ?", [rel_path]).fetchall()
         for row in rows:
             self.db.execute("delete from chunks_fts where rowid = ?", [row["id"]])
-            if self.use_vector:
-                self.db.execute("delete from vec_chunks where rowid = ?", [row["id"]])
         self.db.execute("delete from chunks where file_path = ?", [rel_path])
         self.db.execute("delete from files where path = ?", [rel_path])
 
@@ -729,10 +714,6 @@ def _parse_category_path(configured_path: CategoryPath) -> tuple[str | None, Pat
     return None, Path(configured_path)
 
 
-def _embedding_text(chunk: Chunk) -> str:
-    return f"{chunk.name}\n{chunk.content}"
-
-
 def _fts_query(query: str) -> str:
     tokens = re.findall(r"[\w]+", query)
     if not tokens:
@@ -766,18 +747,21 @@ def _file_row_to_result(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
+def _chapter_row_to_result(row: sqlite3.Row, *, include_content: bool) -> dict[str, Any]:
     result = {
         "file": row["file_path"],
         "category": row["category"],
-        "chunk_type": row["chunk_type"],
-        "chunk_name": row["chunk_name"],
-        "content": row["content"],
+        "type": row["chunk_type"],
+        "chapter_name": row["chunk_name"],
         "start_line": row["start_line"],
         "end_line": row["end_line"],
     }
-    if "distance" in row.keys():
-        result["distance"] = row["distance"]
+    if include_content:
+        result["content"] = row["content"]
     if "score" in row.keys():
         result["score"] = row["score"]
     return result
+
+
+def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
+    return _chapter_row_to_result(row, include_content=True)

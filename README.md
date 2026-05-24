@@ -1,69 +1,179 @@
-# chunk-mcp
+# chapter-mcp
 
-A structure-aware semantic file search MCP server.
+A structure-aware chapter search MCP server and Python library.
 
-`chunk-mcp` indexes configured folders and returns meaningful chunks instead
-of raw line matches. Only folders passed with `--path` are indexed.
+`chapter-mcp` indexes only the folders you opt into with `--path` and returns
+structured chapter results instead of raw line matches.
 
-Markdown files are split into heading sections, Python files into top-level
-functions and classes with `ast`, and other text files into paragraphs.
-Search uses SQLite FTS5 by default. Semantic vector search is available with
-`--vector`, using `sentence-transformers/all-MiniLM-L6-v2` and `sqlite-vec`.
+How chapters are created:
+- Markdown files are split into heading sections
+- Python files are split into top-level functions and classes
+- Other text files are split into paragraphs
+
+The project is intentionally simple:
+- search uses SQLite FTS5
+- results are deterministic
+- library mode and MCP mode share the same core implementation
+- there is no built-in vector or semantic search
 
 ## Tools
 
-- `search(query, category?, limit=1, offset=0)` returns a `count` and the
-  current page of matches. Each result includes `file`, chunk type, chunk name,
-  content, `start_line`, `end_line`, and score/distance. Results include
-  `mode: "fts"` by default, or `mode: "vector"` when started with `--vector`.
-- `get_chunk(file, chunk_name)` fetches one exact indexed chunk. Use it when a
-  prior search result has the right `file` and `chunk_name`, and you want to
-  retrieve that same chunk directly without running another search.
-- `list_files(category?, limit=100, offset=0)` lists indexed files with byte
-  count, line count, chunk count, mtime, and index time. File metadata is
-  available before chunk embedding finishes during background startup.
-- `stats()` returns index totals and category-level counts.
-- `reindex(category?)` manually refreshes changed files.
+- `search(query, category?, limit=1, offset=0)`
+  - general FTS5 search over chapter names and content
+- `search_chapter(query, category?, limit=5, offset=0)`
+  - FTS5 search over chapter names only
+- `read_chapter(chapter_name, file?, category?, count=5, offset=0)`
+  - reads full chapter content by exact chapter name
+- `list_chapters(category?, file?, count=5, offset=0)`
+  - lists chapter names and line ranges without content
+- `list_files(category?, limit=100, offset=0)`
+  - lists indexed files and their metadata
+- `stats()`
+  - returns index totals and category status
+- `reindex(category?)`
+  - refreshes changed files
+
+## Install
+
+```sh
+uv sync
+```
 
 ## Usage
 
-Pass `--path` one or more times to choose folders. Each folder's basename is
-used as the category:
+Pass `--path` one or more times to choose folders. Each folder basename becomes
+the category:
 
 ```sh
-uv run chunk-mcp --path .serena/memories
-uv run chunk-mcp --path docs --path examples
+uv run chapter-mcp --path docs
+uv run chapter-mcp --path docs --path examples
 ```
 
-Use `category=folder` to set the category name explicitly:
+Use `category=path` to set the category name explicitly:
 
 ```sh
-uv run chunk-mcp --path memory=.serena/memories
+uv run chapter-mcp --path knowledge=.serena/memories
 ```
 
-By default the server uses the current working directory as the root and writes
-its database to `.chunk-mcp/index.sqlite3`. It accepts MCP connections
-immediately, starts indexing in the background, checks configured folders every
-second, and reindexes changed files automatically. Use `stats()` to see whether
-startup indexing is still running and what was indexed.
+By default the server:
+- uses the current working directory as the root
+- stores the SQLite index at `.chapter-mcp/index.sqlite3`
+- starts indexing in the background
+- watches configured folders for changes
 
-Enable semantic vector search explicitly:
+Useful flags:
 
 ```sh
-uv run chunk-mcp --path docs --vector
+uv run chapter-mcp --path docs --sync-startup
+uv run chapter-mcp --path docs --no-watch
+uv run chapter-mcp --path docs --watch-interval 0.5
 ```
 
-Tune startup and automatic reindexing with:
+## Search Modes
+
+Use `search` when you want general chapter lookup by content or title:
+
+- `search("json content-type header")`
+- `search("routing config")`
+- `search("Find files by extension")`
+
+Use `search_chapter` when you want to find chapters by title only:
+
+- `search_chapter("Find")`
+- `search_chapter("Introduction")`
+- `search_chapter("Routing")`
+
+`search_chapter` is useful when you know the section name or command/page title
+you are looking for and want to avoid content-only matches.
+
+## Library Usage
+
+```python
+from pathlib import Path
+
+from chapter_mcp import ChapterIndex
+
+index = ChapterIndex(
+    Path.cwd(),
+    Path(".chapter-mcp/index.sqlite3"),
+    category_paths=["docs", "examples"],
+)
+
+index.reindex()
+print(index.search("install"))
+print(index.search_chapter("Guide"))
+index.close()
+```
+
+## MCP Usage
 
 ```sh
-uv run chunk-mcp --path docs --watch-interval 0.5
-uv run chunk-mcp --path docs --no-watch
-uv run chunk-mcp --path docs --vector --no-warmup
-uv run chunk-mcp --path docs --sync-startup
+uv run chapter-mcp \
+  --path instructions \
+  --path knowledge \
+  --sync-startup
 ```
 
-The first vector run may download the embedding model into the local Hugging
-Face cache. FTS5 mode does not need the model.
+Then call tools such as:
+- `list_files()`
+- `list_chapters()`
+- `search("config handling", category="instructions", limit=3)`
+- `search_chapter("Style guide", category="instructions", limit=3)`
+- `read_chapter("Style guide", file="instructions/style-guide.md")`
+
+## Limitations
+
+`chapter-mcp` is deliberately FTS5-only.
+
+That means:
+- literal phrasing matters more than with vector search
+- broad conceptual queries may need better wording
+- unrelated wording will not be matched semantically
+- it does not do nearest-neighbor retrieval or semantic ranking
+
+This tradeoff is intentional: the project favors simple, fast, stable chapter
+lookup over more complex semantic retrieval behavior.
+
+## If You Need Vector Search
+
+If you actually need semantic/vector retrieval, evaluate a dedicated tool such
+as `txtai` separately.
+
+That can make sense when:
+- users ask fuzzy conceptual questions
+- wording often differs a lot from the indexed source text
+- you want a real RAG or semantic retrieval workflow
+
+`chapter-mcp` intentionally does not try to solve that problem.
+
+## MCP Inspector Example
+
+```sh
+npx @modelcontextprotocol/inspector \
+  uv run chapter-mcp \
+  --root /tmp/chapter-mcp-tldr \
+  --path common=pages/common \
+  --path instructions \
+  --sync-startup
+```
+
+Then in the Inspector `Tools` tab try:
+- `stats()`
+- `list_files()`
+- `search("json content-type header", category="common", limit=3)`
+- `search_chapter("curl", category="common", limit=3)`
+
+## Optional TLDR Real-World Test
+
+The repository does not commit the TLDR archive. To run the optional real-world
+test locally:
+
+```sh
+curl -L https://github.com/tldr-pages/tldr/archive/refs/heads/main.zip -o /tmp/tldr-main.zip
+CHAPTER_MCP_TLDR_ZIP=/tmp/tldr-main.zip uv run pytest
+```
+
+If `CHAPTER_MCP_TLDR_ZIP` is not set, the TLDR-based test is skipped.
 
 ## Development
 

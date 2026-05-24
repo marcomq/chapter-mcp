@@ -1,4 +1,4 @@
-from chunk_mcp.chunks import parse_markdown, parse_paragraphs, parse_python
+from chapter_mcp.chunks import parse_markdown, parse_paragraphs, parse_python
 
 
 def test_parse_markdown_sections_preserve_hierarchy() -> None:

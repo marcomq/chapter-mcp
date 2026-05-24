@@ -1,12 +1,12 @@
 [project]
-name = "chunk-mcp"
+name = "chapter-mcp"
 version = "0.1.0"
-description = "A structure-aware semantic file search MCP server."
+description = "A structure-aware chapter search MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Marco Mengelkoch"}]
 license = {text = "MIT"}
-keywords = ["mcp", "search", "semantic", "chunking"]
+keywords = ["mcp", "search", "chapters", "fts5"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -14,16 +14,14 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=2.0.0",
-    "sentence-transformers>=3.0.0",
-    "sqlite-vec>=0.1.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/marcomq/chunk-mcp"
-Repository = "https://github.com/marcomq/chunk-mcp"
+Homepage = "https://github.com/marcomq/chapter-mcp"
+Repository = "https://github.com/marcomq/chapter-mcp"
 
 [project.scripts]
-chunk-mcp = "chunk_mcp.cli:main"
+chapter-mcp = "chapter_mcp.cli:main"
 
 [dependency-groups]
 dev = [
