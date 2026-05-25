@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import os
-import subprocess
 import time
 from pathlib import Path
 import zipfile
@@ -145,6 +144,38 @@ def test_search_can_include_compact_snippet(tmp_path: Path) -> None:
         assert "JSON Content-Type header" in first_chapter(result)["snippet"]
         assert len(first_chapter(result)["snippet"]) <= 120
         assert "content" not in first_chapter(result)
+    finally:
+        index.close()
+
+
+def test_search_exact_code_matches_filters_formal_language_hits_only(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "notes.md",
+        "# Sessions\nExtract the latest Codex session log before comparing runs.\n",
+    )
+    write(
+        tmp_path / "src" / "tools.py",
+        "def extract_codex_session_to_jsonl() -> None:\n"
+        "    \"\"\"Extract a Codex session log.\"\"\"\n"
+        "    return None\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs", "src"])
+
+    try:
+        index.reindex()
+
+        loose = index.search("extract codex session", limit=10)
+        loose_files = {file["file"] for category in loose["results"] for file in category["files"]}
+        assert loose_files == {"docs/notes.md", "src/tools.py"}
+
+        exact = index.search("extract codex session", limit=10, exact_code_matches=True)
+        exact_files = {file["file"] for category in exact["results"] for file in category["files"]}
+        assert exact_files == {"docs/notes.md"}
+        assert exact["count"] == 1
+
+        exact_literal = index.search("extract_codex_session", limit=10, exact_code_matches=True)
+        exact_literal_files = {file["file"] for category in exact_literal["results"] for file in category["files"]}
+        assert exact_literal_files == {"src/tools.py"}
     finally:
         index.close()
 
@@ -541,7 +572,6 @@ def test_default_indexing_respects_gitignore(tmp_path: Path) -> None:
     write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
     write(tmp_path / "ignored" / "secret.md", "# Secret\nIgnored note.")
     write(tmp_path / ".gitignore", "ignored/\n")
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
 
     index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
 
@@ -550,6 +580,22 @@ def test_default_indexing_respects_gitignore(tmp_path: Path) -> None:
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
         assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_nested_gitignore_can_reinclude_files(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "draft.md", "# Draft\nHidden note.")
+    write(tmp_path / "docs" / "keep.md", "# Keep\nVisible note.")
+    write(tmp_path / "docs" / ".gitignore", "*.md\n!keep.md\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
+        assert index.search("draft", limit=1) == {"count": 0, "results": []}
     finally:
         index.close()
 

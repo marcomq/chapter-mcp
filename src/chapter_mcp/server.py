@@ -46,6 +46,7 @@ def create_app(
         limit: int = 5,
         offset: int = 0,
         include_snippet: bool = False,
+        exact_code_matches: bool = False,
     ) -> SearchResponse:
         """Search indexed chapter names and content and return lightweight chapter references."""
         return chapter_index.search(
@@ -54,6 +55,7 @@ def create_app(
             limit=limit,
             offset=offset,
             include_snippet=include_snippet,
+            exact_code_matches=exact_code_matches,
         )
 
     @mcp.tool
@@ -62,9 +64,19 @@ def create_app(
         return chapter_index.search_chapter(query=query, category=category, limit=limit, offset=offset)
 
     @mcp.tool
-    def read_search(query: str, category: str | None = None, offset: int = 0) -> ReadChapterResponse:
+    def read_search(
+        query: str,
+        category: str | None = None,
+        offset: int = 0,
+        exact_code_matches: bool = False,
+    ) -> ReadChapterResponse:
         """Read the full chapter content for the ranked search match at the given offset."""
-        return chapter_index.read_search(query=query, category=category, offset=offset)
+        return chapter_index.read_search(
+            query=query,
+            category=category,
+            offset=offset,
+            exact_code_matches=exact_code_matches,
+        )
 
     @mcp.tool
     def read_chapter(

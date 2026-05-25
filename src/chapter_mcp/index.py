@@ -14,7 +14,7 @@ from typing import Any
 from typing_extensions import NotRequired, TypedDict
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
-from chapter_mcp.ignore_rules import AiIgnoreMatcher, git_root_relative_files, resolve_git_root
+from chapter_mcp.ignore_rules import IgnoreMatcher
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,18 @@ ALLOWED_CHAPTER_COLUMN_FIELDS: tuple[ChapterColumnField, ...] = (
     "name",
     "start_line",
     "end_line",
+)
+FORMAL_CHUNK_TYPES: tuple[str, ...] = (
+    "javascript_class",
+    "javascript_function",
+    "javascript_type",
+    "python_class",
+    "python_function",
+    "rust_function",
+    "rust_impl",
+    "rust_type",
+    "toml_section",
+    "yaml_section",
 )
 
 
@@ -214,8 +226,8 @@ class ChapterIndex:
         self.root = root.expanduser().resolve()
         db_path = db_path.expanduser()
         self.db_path = db_path if db_path.is_absolute() else self.root / db_path
-        self._git_root = resolve_git_root(self.root)
-        self._aiignore_matcher = AiIgnoreMatcher(self.root)
+        self._gitignore_matcher = IgnoreMatcher(self.root, ".gitignore")
+        self._aiignore_matcher = IgnoreMatcher(self.root, ".aiignore")
         self.category_dirs = self._resolve_category_dirs(category_paths)
         self._lock = threading.RLock()
         self._watch_stop = threading.Event()
@@ -346,13 +358,20 @@ class ChapterIndex:
         limit: int = 5,
         offset: int = 0,
         include_snippet: bool = False,
+        exact_code_matches: bool = False,
     ) -> SearchResponse:
         """Search chapter names and content and return lightweight matching chapter references."""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
-        results = self._search_fts(query=query, category=category, limit=limit, offset=offset)
+        results = self._search_fts(
+            query=query,
+            category=category,
+            limit=limit,
+            offset=offset,
+            exact_code_matches=exact_code_matches,
+        )
         if include_snippet:
             self._add_search_snippets(results, query=query)
         return results
@@ -365,12 +384,24 @@ class ChapterIndex:
             raise ValueError(f"unknown category: {category}")
         return self._search_chapter_fts(query=query, category=category, limit=limit, offset=offset)
 
-    def read_search(self, query: str, category: str | None = None, offset: int = 0) -> ReadChapterResponse:
+    def read_search(
+        self,
+        query: str,
+        category: str | None = None,
+        offset: int = 0,
+        exact_code_matches: bool = False,
+    ) -> ReadChapterResponse:
         """Return the full chapter content for the ranked search match at the given offset."""
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
-        matches = self._search_fts(query=query, category=category, limit=1, offset=offset)
+        matches = self._search_fts(
+            query=query,
+            category=category,
+            limit=1,
+            offset=offset,
+            exact_code_matches=exact_code_matches,
+        )
         if not matches["results"]:
             return {"count": matches["count"], "results": []}
 
@@ -687,13 +718,21 @@ class ChapterIndex:
             with self._lock:
                 self._last_background_error = repr(error)
 
-    def _search_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
+    def _search_fts(
+        self,
+        query: str,
+        category: str | None,
+        limit: int,
+        offset: int,
+        exact_code_matches: bool = False,
+    ) -> SearchResponse:
         return self._search_fts_columns(
             query=query,
             category=category,
             limit=limit,
             offset=offset,
             match_column=None,
+            exact_code_matches=exact_code_matches,
         )
 
     def _search_chapter_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
@@ -713,22 +752,36 @@ class ChapterIndex:
         limit: int,
         offset: int,
         match_column: str | None,
+        exact_code_matches: bool = False,
     ) -> SearchResponse:
         fts_query = _fts_query(query)
         match_expression = f"{match_column} : {fts_query}" if match_column is not None else fts_query
+        exact_filter = ""
+        exact_params: list[Any] = []
+        if exact_code_matches:
+            placeholders = ", ".join("?" for _ in FORMAL_CHUNK_TYPES)
+            exact_filter = f"""
+                  and (
+                      chunks.chunk_type not in ({placeholders})
+                      or instr(chunks.chunk_name, ?) > 0
+                      or instr(chunks.content, ?) > 0
+                  )
+                """
+            exact_params = [*FORMAL_CHUNK_TYPES, query, query]
         with self._lock:
             count_row = self.db.execute(
-                """
+                f"""
                 select count(*) as count
                 from chunks_fts
                 join chunks on chunks.id = chunks_fts.rowid
                 where chunks_fts match ?
                   and (? is null or chunks.category = ?)
+                  {exact_filter}
                 """,
-                [match_expression, category, category],
+                [match_expression, category, category, *exact_params],
             ).fetchone()
             rows = self.db.execute(
-                """
+                f"""
                 select
                     chunks.file_path,
                     chunks.category,
@@ -740,10 +793,11 @@ class ChapterIndex:
                 join chunks on chunks.id = chunks_fts.rowid
                 where chunks_fts match ?
                   and (? is null or chunks.category = ?)
+                  {exact_filter}
                 order by bm25(chunks_fts)
                 limit ? offset ?
                 """,
-                [match_expression, category, category, limit, offset],
+                [match_expression, category, category, *exact_params, limit, offset],
             ).fetchall()
             return {
                 "count": count_row["count"] if count_row is not None else 0,
@@ -934,17 +988,10 @@ class ChapterIndex:
 
     def _discover_category_dirs(self) -> dict[str, tuple[Path, ...]]:
         discovered: dict[str, Path] = {}
-        git_files = git_root_relative_files(self.root, self._git_root)
-        if git_files is not None:
-            for rel_path in git_files:
-                top_level = rel_path.parts[0] if rel_path.parts else ""
-                if not top_level or top_level.startswith(".") or top_level == ".chapter-mcp":
-                    continue
-                discovered.setdefault(top_level, self.root / top_level)
-            return {category: (path,) for category, path in sorted(discovered.items())}
-
         for path in sorted(self.root.iterdir()):
             if path.name.startswith(".") or path.name == ".chapter-mcp":
+                continue
+            if self._gitignore_matcher.matches(path, path) or self._aiignore_matcher.matches(path, path):
                 continue
             if path.is_file():
                 try:
@@ -958,13 +1005,7 @@ class ChapterIndex:
 
     def _iter_category_files(self, category: str) -> list[tuple[Path, Path]]:
         files: list[tuple[Path, Path]] = []
-        git_files = git_root_relative_files(self.root, self._git_root)
         for category_root in self.category_dirs[category]:
-            if git_files is not None:
-                git_matches = self._git_category_files(category_root, git_files)
-                if git_matches is not None:
-                    files.extend(git_matches)
-                    continue
             if not category_root.exists():
                 continue
             if category_root.is_file():
@@ -975,25 +1016,6 @@ class ChapterIndex:
                 if not path.is_file() or self._should_skip_path(path, category_root):
                     continue
                 files.append((path, category_root))
-        return files
-
-    def _git_category_files(self, category_root: Path, git_files: Sequence[Path]) -> list[tuple[Path, Path]] | None:
-        try:
-            category_rel = category_root.relative_to(self.root)
-        except ValueError:
-            return None
-
-        files: list[tuple[Path, Path]] = []
-        for rel_path in git_files:
-            if category_root == self.root / rel_path:
-                candidate = self.root / rel_path
-            elif rel_path.is_relative_to(category_rel):
-                candidate = self.root / rel_path
-            else:
-                continue
-            if not candidate.is_file() or self._should_skip_path(candidate, category_root):
-                continue
-            files.append((candidate, category_root))
         return files
 
     def _configured_paths_overlap(self, directory: Path, existing_directory: Path) -> bool:
@@ -1023,6 +1045,8 @@ class ChapterIndex:
             except ValueError:
                 return True
         if any(part.startswith(".") for part in rel_parts):
+            return True
+        if self._gitignore_matcher.matches(path, category_dir):
             return True
         if self._aiignore_matcher.matches(path, category_dir):
             return True
