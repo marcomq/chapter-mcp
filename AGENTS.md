@@ -9,7 +9,8 @@
 - Do not rely on `chapter-mcp` for exact code matching with special characters. FTS5 tokenization can change how code and formal-language strings are represented.
 
 Typical flow:
-1. Find the relevant section with `chapter-mcp`.
+1. Find the relevant section or function name with `chapter-mcp`.
 2. Switch to Serena if symbols or references matter.
 3. Read the smallest needed section with `read_chapter` or `rtk sed`.
-4. Use `rtk rg` for exact literal or regex verification.
+4. Use `list_chapters_as_columns(fields=['name'])` when only function names are needed.
+5. Use `rtk rg` for exact literal or regex verification.
