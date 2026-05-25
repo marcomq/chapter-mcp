@@ -249,10 +249,9 @@ def parse_paragraphs(text: str) -> list[Chunk]:
     flush(len(lines))
     return chunks
 
-
 def _parse_brace_language(
     text: str,
-    match_declaration: "Callable[[str], tuple[str, str] | None]",
+    match_declaration: callable,
 ) -> list[Chunk]:
     lines = text.splitlines()
     chunks: list[Chunk] = []
@@ -261,17 +260,15 @@ def _parse_brace_language(
     chunk_type = ""
     depth = 0
     opened_scope = False
+    is_type_decl = False
 
     for index, line in enumerate(lines, start=1):
         stripped = line.strip()
         if start_line is None and depth == 0:
             matched = match_declaration(stripped)
-            # detect JS `type` declarations so we can handle multi-line `type` aliases
             is_type_decl = False
             js_decl_match = JS_DECLARATION_RE.match(stripped)
             if js_decl_match and js_decl_match.group(3) == "type":
-                # If the declaration contains an '=' or doesn't open a scope or end with ';',
-                # treat it as a potential multi-line type alias that continues until a ';'
                 sanitized_for_decl = _sanitize_brace_line(line)
                 if "=" in stripped or ("{" not in sanitized_for_decl and not stripped.endswith(";")):
                     is_type_decl = True
@@ -288,16 +285,9 @@ def _parse_brace_language(
             depth += sanitized.count("{")
             depth -= sanitized.count("}")
 
-            # termination: either we closed an opened scope, or (for non-brace
-            # declarations) we end on a terminating semicolon. For TypeScript
-            # `type` aliases that we flagged above, continue until a terminating
-            # semicolon is found on any subsequent line.
             if (opened_scope and depth == 0) or (
                 not opened_scope
-                and (
-                    stripped.endswith(";")
-                    or (is_type_decl and ";" in stripped)
-                )
+                and (stripped.endswith(";") or (is_type_decl and ";" in stripped))
             ):
                 source = "\n".join(lines[start_line - 1 : index]).strip()
                 chunks.append(

@@ -1,0 +1,7 @@
+{
+  "paths": [
+    "code=src",
+    "tests=tests",
+    "readme=README.md"
+  ]
+}

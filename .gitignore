@@ -1,4 +1,5 @@
-.chapter-mcp/
+.chapter-mcp/*
+!.chapter-mcp/config.json
 .chunk-mcp/
 .venv/
 __pycache__/
