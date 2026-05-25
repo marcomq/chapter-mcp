@@ -1,0 +1,9 @@
+[mcp_servers.chapter-mcp]
+command = "./.venv/bin/chapter-mcp"
+args = [
+  "--root",
+  ".",
+]
+cwd = "."
+startup_timeout_sec = 20
+required = false

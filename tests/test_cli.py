@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,133 @@ def test_cli_rejects_non_positive_watch_interval(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(
         "sys.argv",
         ["chapter-mcp", "--root", str(tmp_path), "--path", "docs", "--watch-interval", "0"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_loads_paths_from_CHAPTER_MCP_CFG(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    (tmp_path / ".chapter-mcp").mkdir()
+    (tmp_path / ".chapter-mcp" / "config.json").write_text(
+        json.dumps(
+            {
+                "paths": ["code=src", "tests=tests"],
+                "watch": False,
+                "sync_startup": False,
+            }
+        )
+    )
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path)],
+    )
+
+    cli.main()
+
+    assert captured["root"] == tmp_path
+    assert captured["paths"] == ["code=src", "tests=tests"]
+    assert captured["watch"] is False
+    assert captured["async_startup"] is True
+    assert app.run_calls == [{"show_banner": False}]
+
+
+def test_cli_uses_explicit_paths_over_project_config(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    (tmp_path / ".chapter-mcp").mkdir()
+    (tmp_path / ".chapter-mcp" / "config.json").write_text(
+        json.dumps(
+            {
+                "paths": ["code=src"],
+                "watch": False,
+                "sync_startup": False,
+            }
+        )
+    )
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path), "--path", "docs", "--sync-startup"],
+    )
+
+    cli.main()
+
+    assert captured["paths"] == ["docs"]
+    assert captured["watch"] is False
+    assert captured["async_startup"] is False
+
+
+def test_cli_loads_custom_project_config_path(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    config_path = tmp_path / "chapter-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "root": ".",
+                "db": ".chapter-mcp/custom.sqlite3",
+                "paths": ["code=src"],
+                "watch_interval": 2.5,
+            }
+        )
+    )
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path), "--config", str(config_path)],
+    )
+
+    cli.main()
+
+    assert captured["root"] == tmp_path
+    assert captured["db_path"] == tmp_path / ".chapter-mcp" / "custom.sqlite3"
+    assert captured["watch_interval"] == 2.5
+    assert captured["async_startup"] is False
+
+
+def test_cli_rejects_missing_paths_without_project_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path)],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_rejects_invalid_project_config(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".chapter-mcp").mkdir()
+    (tmp_path / ".chapter-mcp" / "config.json").write_text(json.dumps({"paths": []}))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path)],
     )
 
     with pytest.raises(SystemExit) as exc_info:

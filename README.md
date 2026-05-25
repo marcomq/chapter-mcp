@@ -2,13 +2,19 @@
 
 A structure-aware chapter search MCP server and Python library.
 
-`chapter-mcp` indexes only the folders you opt into with `--path` and returns
-structured chapter results instead of raw line matches.
+`chapter-mcp` indexes only the folders you opt into, either via CLI `--path`
+flags or a project-local `.chapter-mcp/config.json`, and returns structured
+chapter results instead of raw line matches.
 
 How chapters are created:
 - Markdown files are split into heading sections
 - Python files are split into top-level functions and classes
 - Other text files are split into paragraphs
+
+Result shape:
+- chapter-returning tools group results by `category` and then `file`
+- chapter entries are compact and omit `type` by default
+- chapter entries use `name`, `start_line`, `end_line`, plus optional `content`, `snippet`, or `score`
 
 The project is intentionally simple:
 - search uses SQLite FTS5
@@ -18,14 +24,18 @@ The project is intentionally simple:
 
 ## Tools
 
-- `search(query, category?, limit=1, offset=0)`
-  - general FTS5 search over chapter names and content
+- `search(query, category?, limit=5, offset=0, include_snippet=False)`
+  - general FTS5 search over chapter names and content, returning grouped chapter references and optional snippets
 - `search_chapter(query, category?, limit=5, offset=0)`
-  - FTS5 search over chapter names only
-- `read_chapter(chapter_name, file?, category?, count=5, offset=0)`
-  - reads full chapter content by exact chapter name
+  - FTS5 search over chapter names only, returning grouped chapter references
+- `read_search(query, category?, offset=0)`
+  - reads the full chapter content for the ranked search match
+- `read_chapter(chapter_name, file?, category?, count=5, offset=0, content_offset=0, content_limit?)`
+  - reads chapter content by exact chapter name, optionally sliced by content lines
 - `list_chapters(category?, file?, count=5, offset=0)`
-  - lists chapter names and line ranges without content
+  - lists grouped chapter names and line ranges without content
+- `list_chapters_as_columns(category?, file?, count=5, offset=0, fields?)`
+  - lists chapters grouped by file, with compact rows ordered exactly like `columns`
 - `list_files(category?, limit=100, offset=0)`
   - lists indexed files and their metadata
 - `stats()`
@@ -55,27 +65,57 @@ Use `category=path` to set the category name explicitly:
 uv run chapter-mcp --path knowledge=.serena/memories
 ```
 
+If you prefer project-local config, add `.chapter-mcp/config.json`:
+
+```json
+{
+  "paths": [
+    "code=src",
+    "tests=tests",
+    "readme=README.md"
+  ]
+}
+```
+
+Then run:
+
+```sh
+uv run chapter-mcp
+```
+
+Supported config fields:
+- `root` optional, defaults to the current working directory
+- `db` optional, defaults to `<root>/.chapter-mcp/index.sqlite3`
+- `paths` required when using config
+- `watch` optional, defaults to `true`
+- `watch_interval` optional, defaults to `1.0`
+- `sync_startup` optional, defaults to `true`
+
+CLI flags override project config when both are present.
+
 By default the server:
 - uses the current working directory as the root
 - stores the SQLite index at `.chapter-mcp/index.sqlite3`
-- starts indexing in the background
+- runs startup indexing before accepting MCP connections
 - watches configured folders for changes
 
 Useful flags:
 
 ```sh
-uv run chapter-mcp --path docs --sync-startup
+uv run chapter-mcp --path docs
 uv run chapter-mcp --path docs --no-watch
+uv run chapter-mcp --path docs --no-sync-startup
 uv run chapter-mcp --path docs --watch-interval 0.5
 ```
 
 ## Search Modes
 
-Use `search` when you want general chapter lookup by content or title:
+Use `search` when you want general chapter lookup by content or title and only need compact references:
 
 - `search("json content-type header")`
 - `search("routing config")`
 - `search("Find files by extension")`
+- `search("json content-type header", include_snippet=True)`
 
 Use `search_chapter` when you want to find chapters by title only:
 
@@ -85,6 +125,125 @@ Use `search_chapter` when you want to find chapters by title only:
 
 `search_chapter` is useful when you know the section name or command/page title
 you are looking for and want to avoid content-only matches.
+
+Example grouped result shape:
+
+```json
+{
+  "count": 2,
+  "results": [
+    {
+      "category": "docs",
+      "files": [
+        {
+          "file": "docs/curl.md",
+          "chapters": [
+            {
+              "name": "curl",
+              "start_line": 1,
+              "end_line": 8,
+              "snippet": "Use curl when sending a JSON Content-Type header..."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Partial chapter reads:
+
+- `content_offset` skips that many lines from the beginning of the stored chapter content
+- `content_limit` returns at most that many content lines after the offset
+- slicing is line-based within chapter content, not by absolute file line numbers
+
+Example:
+
+```json
+{
+  "count": 1,
+  "results": [
+    {
+      "category": "code",
+      "files": [
+        {
+          "file": "src/chapter_mcp/index.py",
+          "chapters": [
+            {
+              "name": "read_chapter",
+              "start_line": 373,
+              "end_line": 414,
+              "content": "def read_chapter(\n    self,",
+              "content_offset": 0,
+              "content_total_lines": 12,
+              "content_truncated": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Column mode for high-volume listing:
+
+- allowed `fields`: `name`, `start_line`, `end_line`
+- default `fields`: `name`, `start_line`, `end_line`
+- results stay grouped by `category` and `file`
+- this costs a small amount of extra JSON overhead compared to a fully flat table
+- the grouping is intentional because it avoids repeating file paths per row and keeps follow-up reads easier
+
+Example:
+
+```json
+{
+  "results": [
+    {
+      "category": "code",
+      "files": [
+        {
+          "file": "src/chapter_mcp/chunks.py",
+          "columns": ["name", "start_line", "end_line"],
+          "rows": [
+            ["Chunk", 9, 15]
+          ]
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}
+```
+
+Example with explicit fields:
+
+```json
+{
+  "results": [
+    {
+      "category": "code",
+      "files": [
+        {
+          "file": "src/chapter_mcp/chunks.py",
+          "columns": ["name"],
+          "rows": [
+            ["Chunk"]
+          ]
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}
+```
+
+Use `read_search` when you want to open the best full chapter match directly:
+
+- `read_search("json content-type header")`
+- `read_search("Routing")`
+- `read_search("Find files by extension", category="common")`
 
 ## Library Usage
 
@@ -102,6 +261,7 @@ index = ChapterIndex(
 index.reindex()
 print(index.search("install"))
 print(index.search_chapter("Guide"))
+print(index.read_search("install"))
 index.close()
 ```
 
@@ -117,9 +277,55 @@ uv run chapter-mcp \
 Then call tools such as:
 - `list_files()`
 - `list_chapters()`
+- `list_chapters_as_columns(fields=["name"])`
 - `search("config handling", category="instructions", limit=3)`
 - `search_chapter("Style guide", category="instructions", limit=3)`
+- `read_search("config handling", category="instructions")`
 - `read_chapter("Style guide", file="instructions/style-guide.md")`
+- `read_chapter("Style guide", file="instructions/style-guide.md", content_offset=0, content_limit=20)`
+
+Workspace MCP config:
+- `.codex/config.toml` configures the server for project-local Codex usage.
+- `.chapter-mcp/config.json` defines what a given project indexes.
+- `.mcp.json` can stay generic and only describe how to launch the server.
+
+## Codex Setup
+
+If project-local `.codex/config.toml` works in your Codex environment, prefer that.
+
+If your Codex surface only reliably loads global MCP config, you can still keep folder selection project-specific by using one generic global server entry and storing the actual index configuration in each repo's `.chapter-mcp/config.json`.
+
+Example global Codex config:
+
+```toml
+[mcp_servers.chapter-mcp]
+command = "/opt/homebrew/bin/uv"
+args = [
+  "run",
+  "python",
+  "-m",
+  "chapter_mcp",
+  "--root",
+  ".",
+]
+cwd = "."
+startup_timeout_sec = 20
+required = false
+```
+
+With that setup, `chapter-mcp` starts in the current workspace and reads per-project index settings from `.chapter-mcp/config.json` automatically when no `--path` flags are passed directly.
+
+Example project `.chapter-mcp/config.json`:
+
+```json
+{
+  "paths": [
+    "code=src",
+    "tests=tests",
+    "readme=README.md"
+  ]
+}
+```
 
 ## Limitations
 
@@ -162,6 +368,7 @@ Then in the Inspector `Tools` tab try:
 - `list_files()`
 - `search("json content-type header", category="common", limit=3)`
 - `search_chapter("curl", category="common", limit=3)`
+- `read_search("json content-type header", category="common")`
 
 ## Optional TLDR Real-World Test
 
