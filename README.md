@@ -217,7 +217,6 @@ Example:
 }
 ```
 
-Example with explicit fields:
 
 ## Using chapter-mcp with Serena, rg, and sed
 
@@ -366,6 +365,83 @@ Example project `.chapter-mcp/config.json`:
   ]
 }
 ```
+
+## Benchmarking Observed Tool Traffic
+
+`chapter-mcp` does not measure token savings internally. If you want to benchmark a baseline run against a chapter-first run, capture observed tool traffic outside the server and compare those logs offline.
+
+Supported external capture approaches include:
+
+- Codex session logs in `~/.codex/sessions/...jsonl`
+- `rtk` wrapper logging
+- shell execution logging
+- MCP proxy logging
+
+If you are using Codex locally, prefer extracting from the real session logs first:
+
+```sh
+uv run chapter-mcp benchmark extract-codex-session --out baseline.jsonl
+uv run chapter-mcp benchmark extract-codex-session ~/.codex/sessions/2026/05/25/example.jsonl --out chapter-first.jsonl
+```
+
+The first form uses the latest session log under `~/.codex/sessions`.
+
+That command emits neutral JSONL records like:
+
+```jsonl
+{"tool":"sed","cmd":"rtk sed -n '1,220p' src/foo.py","chars_out":12340,"lines_out":220}
+{"tool":"rg","cmd":"rtk rg column src","chars_out":1840,"lines_out":35}
+{"tool":"chapter-mcp","call_name":"search","chars_out":2300,"lines_out":40}
+```
+
+Required fields:
+
+- `tool`
+- `chars_out`
+
+Optional fields:
+
+- `bytes_out`
+- `lines_out`
+- `cmd`
+- `path`
+- `range`
+- `timestamp`
+
+Summarize one observed run:
+
+```sh
+uv run chapter-mcp benchmark summarize baseline.jsonl
+uv run chapter-mcp benchmark summarize baseline.jsonl --json
+```
+
+Compare a baseline run and a chapter-first run:
+
+```sh
+uv run chapter-mcp benchmark compare baseline.jsonl chapter-first.jsonl
+uv run chapter-mcp benchmark compare baseline.jsonl chapter-first.jsonl --json
+```
+
+The comparison reports:
+
+- totals by tool
+- total chars, bytes, and lines
+- estimated output tokens using a transparent `chars / 4` heuristic
+- a chapter-mcp candidate raw-read budget based on `sed` / `cat` / `head` / `tail`
+- largest raw reads
+- repeated reads when they can be derived from `path`, `range`, or `cmd`
+- deltas between the two observed runs
+
+By default `summarize` and `compare` print a compact human-readable summary. Use `--json` when you want the full structured report.
+
+Important limits:
+
+- this compares observed runs only
+- it does not infer what the model would have done otherwise
+- token estimates are not provider billing tokens
+- it does not trace hidden reasoning or task quality
+- extracted Codex records measure tool output that Codex wrote into the session log, which is the closest live source available here
+- the chapter-mcp candidate budget is only a heuristic upper bound for raw reads that might be replaceable; it keeps `rg` separate because exact search often remains necessary
 
 ## Limitations
 

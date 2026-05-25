@@ -4,9 +4,18 @@ import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
+from chapter_mcp.benchmark import (
+    compare_logs,
+    extract_codex_session_to_jsonl,
+    format_compare_report,
+    format_summary_report,
+    latest_codex_session_log,
+    summarize_log,
+)
 from chapter_mcp.server import create_app
 
 
@@ -26,6 +35,16 @@ def _validate_positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}")
+    return parsed
+
+
+def _validate_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
     return parsed
 
 
@@ -99,8 +118,7 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
     }
 
 
-def main() -> None:
-    _configure_logging()
+def _serve(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Run the chapter-mcp chapter search server.")
     parser.add_argument("--root", type=Path, default=None, help="Root directory to index. Defaults to the current working directory.")
     parser.add_argument(
@@ -157,7 +175,7 @@ def main() -> None:
         default=None,
         help="Disable startup indexing before accepting MCP connections.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     root = (args.root or Path.cwd()).expanduser().resolve()
     config: dict[str, Any] | None = None
     config_path = args.config or (root / CHAPTER_MCP_CFG)
@@ -200,3 +218,102 @@ def main() -> None:
         watch_interval=watch_interval,
     )
     app.run(show_banner=False)
+
+
+def _benchmark(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(description="Summarize or compare externally captured tool-output logs.")
+    subparsers = parser.add_subparsers(dest="benchmark_command", required=True)
+
+    summarize_parser = subparsers.add_parser("summarize", help="Summarize one observed JSONL log.")
+    summarize_parser.add_argument("log_path", type=Path, help="Path to the JSONL log to summarize.")
+    summarize_parser.add_argument(
+        "--chars-per-token",
+        type=_validate_positive_float,
+        default=4.0,
+        help="Estimated characters per token. Defaults to 4.0.",
+    )
+    summarize_parser.add_argument(
+        "--top-n",
+        type=_validate_positive_int,
+        default=5,
+        help="Number of largest raw reads and repeated reads to include. Defaults to 5.",
+    )
+    summarize_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full JSON report instead of the compact summary.",
+    )
+
+    compare_parser = subparsers.add_parser("compare", help="Compare baseline and chapter-first JSONL logs.")
+    compare_parser.add_argument("baseline_log", type=Path, help="Path to the baseline JSONL log.")
+    compare_parser.add_argument("chapter_first_log", type=Path, help="Path to the chapter-first JSONL log.")
+    compare_parser.add_argument(
+        "--chars-per-token",
+        type=_validate_positive_float,
+        default=4.0,
+        help="Estimated characters per token. Defaults to 4.0.",
+    )
+    compare_parser.add_argument(
+        "--top-n",
+        type=_validate_positive_int,
+        default=5,
+        help="Number of largest raw reads and repeated reads to include per log. Defaults to 5.",
+    )
+    compare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full JSON report instead of the compact summary.",
+    )
+
+    extract_parser = subparsers.add_parser(
+        "extract-codex-session",
+        help="Extract observed tool outputs from a Codex session JSONL file.",
+    )
+    extract_parser.add_argument(
+        "session_log",
+        type=Path,
+        nargs="?",
+        help="Path to a Codex session JSONL file. Defaults to the latest file under ~/.codex/sessions.",
+    )
+    extract_parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="Path to the neutral JSONL file to write.",
+    )
+
+    args = parser.parse_args(argv)
+    try:
+        if args.benchmark_command == "summarize":
+            result = summarize_log(args.log_path, chars_per_token=args.chars_per_token, top_n=args.top_n)
+        elif args.benchmark_command == "extract-codex-session":
+            session_log = args.session_log or latest_codex_session_log()
+            result = extract_codex_session_to_jsonl(session_log, args.out)
+        else:
+            result = compare_logs(
+                args.baseline_log,
+                args.chapter_first_log,
+                chars_per_token=args.chars_per_token,
+                top_n=args.top_n,
+            )
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+        return
+
+    if args.benchmark_command == "summarize" and not args.json:
+        print(format_summary_report(result))
+        return
+    if args.benchmark_command == "compare" and not args.json:
+        print(format_compare_report(result))
+        return
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def main() -> None:
+    _configure_logging()
+    argv = sys.argv[1:]
+    if argv[:1] == ["benchmark"]:
+        _benchmark(argv[1:])
+        return
+    _serve(argv)
