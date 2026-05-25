@@ -219,6 +219,46 @@ Example:
 
 Example with explicit fields:
 
+## Using chapter-mcp with Serena, rg, and sed
+
+`chapter-mcp` is a lightweight, fresh, chapter-based context layer for agent workflows. It complements Serena and shell tools instead of replacing them.
+
+- Use `chapter-mcp` for indexed project context such as docs, README files, help text, instructions, ADRs, Markdown/TXT, and optionally chapterized source sections.
+- Prefer `chapter-mcp` for exploratory or relevance-ranked search. It returns ranked sections with path, `start_line`, `end_line`, `name`, optional `kind`, and optional `score`.
+- For Markdown, TXT, and docs, normal full-text chapter search is usually the right default.
+- Do not use `chapter-mcp` as an exact source-code matcher. SQLite FTS5 tokenization is a poor fit for exact literals in code and formal languages, especially when special characters, paths, routes, punctuation, or operators matter.
+- Use Serena for symbol-aware work such as definitions, references, implementations, diagnostics, and symbol-level edits.
+- Use `rg` for exact literals, identifiers, routes, config keys, error messages, regex searches, non-indexed files, and raw verification after edits.
+- Use `sed` when you already know the path and line range and need the raw source text.
+- `read_chapter` with `content_offset` and `content_limit` can replace many `sed` reads for indexed docs and chapterized sections.
+- `chapter-mcp` is designed to keep its index fresh automatically during an agent session, so manual reindexing should rarely be needed.
+
+Tool selection:
+
+- Use `chapter-mcp` when the question is:
+  - "Which project section is relevant?"
+  - "Where is this behavior documented?"
+  - "What guidance applies before editing?"
+  - "Find the best matching chapter or section for this task."
+- Use Serena when the question is:
+  - "Where is this symbol defined?"
+  - "Who references this function or type?"
+  - "What implementations exist?"
+  - "Can this symbol or body be edited safely?"
+- Use `rg` when the question is:
+  - "Does this exact literal occur?"
+  - "Where is this error message, route, or config key?"
+  - "I need regex or raw text verification."
+- Use `sed` when:
+  - "I already know the path and line range and need the raw source text."
+
+Example flow:
+
+1. Use `chapter-mcp` to find the relevant docs, instructions, or section.
+2. Use Serena if symbols, references, or diagnostics are involved.
+3. Use `read_chapter` with limits for indexed chapters, or `sed` for raw source ranges.
+4. Use `rg` for exact literal or regex verification.
+
 ```json
 {
   "results": [
