@@ -191,6 +191,9 @@ Column mode for high-volume listing:
 
 - allowed `fields`: `name`, `start_line`, `end_line`
 - default `fields`: `name`, `start_line`, `end_line`
+- results stay grouped by `category` and `file`
+- this costs a small amount of extra JSON overhead compared to a fully flat table
+- the grouping is intentional because it avoids repeating file paths per row and keeps follow-up reads easier
 
 Example:
 
