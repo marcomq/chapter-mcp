@@ -14,6 +14,7 @@ from typing import Any
 from typing_extensions import NotRequired, TypedDict
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
+from chapter_mcp.ignore_rules import AiIgnoreMatcher, git_root_relative_files, resolve_git_root
 
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,8 @@ class ChapterIndex:
         self.root = root.expanduser().resolve()
         db_path = db_path.expanduser()
         self.db_path = db_path if db_path.is_absolute() else self.root / db_path
+        self._git_root = resolve_git_root(self.root)
+        self._aiignore_matcher = AiIgnoreMatcher(self.root)
         self.category_dirs = self._resolve_category_dirs(category_paths)
         self._lock = threading.RLock()
         self._watch_stop = threading.Event()
@@ -905,7 +908,9 @@ class ChapterIndex:
         self.db.execute("delete from files where path = ?", [rel_path])
 
     def _resolve_category_dirs(self, category_paths: Sequence[CategoryPath] | None) -> dict[str, tuple[Path, ...]]:
-        configured_paths = category_paths or ()
+        if category_paths is None:
+            return self._discover_category_dirs()
+        configured_paths = category_paths
         category_dirs: dict[str, list[Path]] = {}
         resolved_paths: list[tuple[str, Path]] = []
         for configured_path in configured_paths:
@@ -927,9 +932,39 @@ class ChapterIndex:
             resolved_paths.append((category, directory))
         return {category: tuple(paths) for category, paths in category_dirs.items()}
 
+    def _discover_category_dirs(self) -> dict[str, tuple[Path, ...]]:
+        discovered: dict[str, Path] = {}
+        git_files = git_root_relative_files(self.root, self._git_root)
+        if git_files is not None:
+            for rel_path in git_files:
+                top_level = rel_path.parts[0] if rel_path.parts else ""
+                if not top_level or top_level.startswith(".") or top_level == ".chapter-mcp":
+                    continue
+                discovered.setdefault(top_level, self.root / top_level)
+            return {category: (path,) for category, path in sorted(discovered.items())}
+
+        for path in sorted(self.root.iterdir()):
+            if path.name.startswith(".") or path.name == ".chapter-mcp":
+                continue
+            if path.is_file():
+                try:
+                    sample = path.read_bytes()[:4096]
+                except OSError:
+                    continue
+                if not is_probably_text(path, sample):
+                    continue
+            discovered[path.name] = path
+        return {category: (path,) for category, path in discovered.items()}
+
     def _iter_category_files(self, category: str) -> list[tuple[Path, Path]]:
         files: list[tuple[Path, Path]] = []
+        git_files = git_root_relative_files(self.root, self._git_root)
         for category_root in self.category_dirs[category]:
+            if git_files is not None:
+                git_matches = self._git_category_files(category_root, git_files)
+                if git_matches is not None:
+                    files.extend(git_matches)
+                    continue
             if not category_root.exists():
                 continue
             if category_root.is_file():
@@ -940,6 +975,25 @@ class ChapterIndex:
                 if not path.is_file() or self._should_skip_path(path, category_root):
                     continue
                 files.append((path, category_root))
+        return files
+
+    def _git_category_files(self, category_root: Path, git_files: Sequence[Path]) -> list[tuple[Path, Path]] | None:
+        try:
+            category_rel = category_root.relative_to(self.root)
+        except ValueError:
+            return None
+
+        files: list[tuple[Path, Path]] = []
+        for rel_path in git_files:
+            if category_root == self.root / rel_path:
+                candidate = self.root / rel_path
+            elif rel_path.is_relative_to(category_rel):
+                candidate = self.root / rel_path
+            else:
+                continue
+            if not candidate.is_file() or self._should_skip_path(candidate, category_root):
+                continue
+            files.append((candidate, category_root))
         return files
 
     def _configured_paths_overlap(self, directory: Path, existing_directory: Path) -> bool:
@@ -969,6 +1023,8 @@ class ChapterIndex:
             except ValueError:
                 return True
         if any(part.startswith(".") for part in rel_parts):
+            return True
+        if self._aiignore_matcher.matches(path, category_dir):
             return True
         try:
             if path.resolve() == self.db_path.resolve():

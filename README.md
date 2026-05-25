@@ -2,9 +2,10 @@
 
 A structure-aware chapter search MCP server and Python library.
 
-`chapter-mcp` indexes only the folders you opt into, either via CLI `--path`
-flags or a project-local `.chapter-mcp/config.json`, and returns structured
-chapter results instead of raw line matches.
+`chapter-mcp` indexes the folders you opt into via CLI `--path` flags or a
+project-local `.chapter-mcp/config.json`. If no config exists yet, it falls
+back to indexing the whole project, respects `.gitignore` when the root is a
+Git repository, and applies `.aiignore` rules.
 
 How chapters are created:
 - Markdown files are split into heading sections
@@ -82,6 +83,10 @@ Then run:
 ```sh
 uv run chapter-mcp
 ```
+
+If there is no config file and you do not pass `--path`, `chapter-mcp`
+auto-discovers visible top-level project entries and indexes all non-ignored
+files. `.aiignore` files use gitignore-style patterns, including `!` negation.
 
 Supported config fields:
 - `root` optional, defaults to the current working directory

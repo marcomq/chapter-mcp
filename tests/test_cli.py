@@ -150,16 +150,25 @@ def test_cli_loads_custom_project_config_path(monkeypatch, tmp_path: Path) -> No
     assert captured["async_startup"] is False
 
 
-def test_cli_rejects_missing_paths_without_project_config(monkeypatch, tmp_path: Path) -> None:
+def test_cli_indexes_project_by_default_without_project_config(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
     monkeypatch.setattr(
         "sys.argv",
         ["chapter-mcp", "--root", str(tmp_path)],
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main()
+    cli.main()
 
-    assert exc_info.value.code == 2
+    assert captured["root"] == tmp_path
+    assert captured["paths"] is None
+    assert app.run_calls == [{"show_banner": False}]
 
 
 def test_cli_rejects_invalid_project_config(monkeypatch, tmp_path: Path) -> None:

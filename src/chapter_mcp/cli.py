@@ -142,7 +142,8 @@ def _serve(argv: list[str]) -> None:
         default=None,
         help=(
             "Load chapter-mcp project config from a JSON file. "
-            "If omitted and no --path values are passed, defaults to <root>/.chapter-mcp/config.json."
+            "If omitted and no --path values are passed, defaults to <root>/.chapter-mcp/config.json "
+            "before falling back to indexing the whole project."
         ),
     )
     parser.add_argument(
@@ -192,14 +193,7 @@ def _serve(argv: list[str]) -> None:
     if effective_db is None and config and config["db"] is not None:
         effective_db = Path(config["db"])
 
-    paths = args.paths
-    if not paths:
-        if config is None:
-            parser.error(
-                f"no --path values were provided and project config {config_path} was not found; "
-                "pass --path, add .chapter-mcp/config.json, or use --config"
-            )
-        paths = config["paths"]
+    paths = args.paths if args.paths else (config["paths"] if config is not None else None)
 
     watch = False if args.no_watch else (config["watch"] if config and config["watch"] is not None else True)
     watch_interval = args.watch_interval

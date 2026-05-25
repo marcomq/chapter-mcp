@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 import os
+import subprocess
 import time
 from pathlib import Path
 import zipfile
@@ -522,14 +523,65 @@ def test_multiple_paths_can_share_one_category(tmp_path: Path) -> None:
         index.close()
 
 
-def test_no_configured_paths_indexes_nothing(tmp_path: Path) -> None:
+def test_no_configured_paths_indexes_visible_project_files(tmp_path: Path) -> None:
     write(tmp_path / "knowledge" / "alpha.md", "# Alpha\nAlpha note.")
+    write(tmp_path / ".hidden" / "secret.md", "# Secret\nHidden note.")
     index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
 
     try:
         stats = index.reindex()
-        assert stats.as_dict() == {"scanned": 0, "indexed": 0, "skipped": 0, "deleted": 0}
-        assert index.search("alpha", limit=1) == {"count": 0, "results": []}
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "knowledge/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_default_indexing_respects_gitignore(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "ignored" / "secret.md", "# Secret\nIgnored note.")
+    write(tmp_path / ".gitignore", "ignored/\n")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_default_indexing_respects_aiignore(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "ignored" / "secret.md", "# Secret\nIgnored note.")
+    write(tmp_path / ".aiignore", "ignored/\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_nested_aiignore_can_reinclude_files(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "draft.md", "# Draft\nHidden note.")
+    write(tmp_path / "docs" / "keep.md", "# Keep\nVisible note.")
+    write(tmp_path / "docs" / ".aiignore", "*.md\n!keep.md\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
+        assert index.search("draft", limit=1) == {"count": 0, "results": []}
     finally:
         index.close()
 
