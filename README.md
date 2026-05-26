@@ -1,429 +1,335 @@
 # chapter-mcp
 
-A structure-aware chapter search MCP server and Python library.
+`chapter-mcp` gives coding agents a compact way to search a project by useful
+sections instead of opening whole files.
 
-`chapter-mcp` indexes only the folders you opt into, either via CLI `--path`
-flags or a project-local `.chapter-mcp/config.json`, and returns structured
-chapter results instead of raw line matches.
+It indexes a workspace locally, splits files into "chapters", and exposes MCP
+tools for searching, listing, and reading those chapters. The goal is simple:
+help an assistant find the right part of a repo before it burns context on raw
+file reads.
 
-How chapters are created:
-- Markdown files are split into heading sections
-- Python files are split into top-level functions and classes
-- Other text files are split into paragraphs
+It is intentionally boring in a good way: local SQLite FTS5, deterministic
+full-text search, no embeddings, no vector database, and no external service.
 
-Result shape:
-- chapter-returning tools group results by `category` and then `file`
-- chapter entries are compact and omit `type` by default
-- chapter entries use `name`, `start_line`, `end_line`, plus optional `content`, `snippet`, or `score`
+## What it is good for
 
-The project is intentionally simple:
-- search uses SQLite FTS5
-- results are deterministic
-- library mode and MCP mode share the same core implementation
-- there is no built-in vector or semantic search
+Use `chapter-mcp` when an assistant needs project context but does not yet know
+which file or section matters. Good fits:
 
-## Tools
+- project README sections
+- `AGENTS.md`, `CLAUDE.md`, instructions, and local notes
+- ADRs and design docs
+- Markdown/TXT documentation
+- source files where top-level classes or functions make useful chapters
+- focused reads after a search result points to the right line range
 
-- `search(query, category?, limit=5, offset=0, include_snippet=False)`
-  - general FTS5 search over chapter names and content, returning grouped chapter references and optional snippets
-- `search_chapter(query, category?, limit=5, offset=0)`
-  - FTS5 search over chapter names only, returning grouped chapter references
-- `read_search(query, category?, offset=0)`
-  - reads the full chapter content for the ranked search match
-- `read_chapter(chapter_name, file?, category?, count=5, offset=0, content_offset=0, content_limit?)`
-  - reads chapter content by exact chapter name, optionally sliced by content lines
-- `list_chapters(category?, file?, count=5, offset=0)`
-  - lists grouped chapter names and line ranges without content
-- `list_chapters_as_columns(category?, file?, count=5, offset=0, fields?)`
-  - lists chapters grouped by file, with compact rows ordered exactly like `columns`
-- `list_files(category?, limit=100, offset=0)`
-  - lists indexed files and their metadata
-- `stats()`
-  - returns index totals and category status
-- `reindex(category?)`
-  - refreshes changed files
+Not a good fit:
+
+- exact code matching with punctuation, operators, routes, or config keys
+- symbol references, definitions, diagnostics, or safe edits
+- fuzzy semantic search across very different wording
+
+For those, keep using the sharper tool: `rg` for exact text, Serena or another
+language-aware tool for symbols, raw file reads for known ranges, and
+vector/RAG tooling for real semantic retrieval.
+
+## How chapters work
+
+`chapter-mcp` turns files into smaller units: Markdown by headings, Python by
+top-level classes/functions, and other text files by paragraphs. Search results
+point to chapter names and line ranges. Reads can return a whole chapter or a
+limited slice of chapter content.
+
+By default, if no explicit config is provided, `chapter-mcp` discovers visible
+top-level project entries and indexes them. In a Git repo it uses tracked files,
+skips hidden top-level entries and `.chapter-mcp`, respects `.gitignore`, and
+applies `.aiignore` rules.
+
+That means the happy path is: add the MCP server to your assistant, start the
+assistant in a repo, and let discovery do the first pass.
 
 ## Install
 
-```sh
-uv sync
-```
-
-## Usage
-
-Pass `--path` one or more times to choose folders. Each folder basename becomes
-the category:
+`chapter-mcp` is available on PyPI. The quickest way to run it is with `uvx`:
 
 ```sh
-uv run chapter-mcp --path docs
-uv run chapter-mcp --path docs --path examples
+uvx chapter-mcp --root .
 ```
 
-Use `category=path` to set the category name explicitly:
+For a persistent install, use:
 
 ```sh
-uv run chapter-mcp --path knowledge=.serena/memories
+uv tool install chapter-mcp
 ```
 
-If you prefer project-local config, add `.chapter-mcp/config.json`:
-
-```json
-{
-  "paths": [
-    "code=src",
-    "tests=tests",
-    "readme=README.md"
-  ]
-}
-```
-
-Then run:
+or:
 
 ```sh
-uv run chapter-mcp
+pip install chapter-mcp
 ```
 
-Supported config fields:
-- `root` optional, defaults to the current working directory
-- `db` optional, defaults to `<root>/.chapter-mcp/index.sqlite3`
-- `paths` required when using config
-- `watch` optional, defaults to `true`
-- `watch_interval` optional, defaults to `1.0`
-- `sync_startup` optional, defaults to `true`
+For local development from this checkout, see [Development](#development).
 
-CLI flags override project config when both are present.
+## Use Case 1: Local Development Project
 
-By default the server:
-- uses the current working directory as the root
-- stores the SQLite index at `.chapter-mcp/index.sqlite3`
-- runs startup indexing before accepting MCP connections
-- watches configured folders for changes
+For a normal local project, do not start `chapter-mcp` manually in a terminal.
+Add it to the MCP config for the assistant you use in that project.
 
-Useful flags:
+When the assistant starts the server, `chapter-mcp` indexes the project root
+automatically unless you override it. No project config is required for the
+first run.
 
-```sh
-uv run chapter-mcp --path docs
-uv run chapter-mcp --path docs --no-watch
-uv run chapter-mcp --path docs --no-sync-startup
-uv run chapter-mcp --path docs --watch-interval 0.5
-```
+### Codex
 
-## Search Modes
-
-Use `search` when you want general chapter lookup by content or title and only need compact references:
-
-- `search("json content-type header")`
-- `search("routing config")`
-- `search("Find files by extension")`
-- `search("json content-type header", include_snippet=True)`
-
-Use `search_chapter` when you want to find chapters by title only:
-
-- `search_chapter("Find")`
-- `search_chapter("Introduction")`
-- `search_chapter("Routing")`
-
-`search_chapter` is useful when you know the section name or command/page title
-you are looking for and want to avoid content-only matches.
-
-Example grouped result shape:
-
-```json
-{
-  "count": 2,
-  "results": [
-    {
-      "category": "docs",
-      "files": [
-        {
-          "file": "docs/curl.md",
-          "chapters": [
-            {
-              "name": "curl",
-              "start_line": 1,
-              "end_line": 8,
-              "snippet": "Use curl when sending a JSON Content-Type header..."
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
-Partial chapter reads:
-
-- `content_offset` skips that many lines from the beginning of the stored chapter content
-- `content_limit` returns at most that many content lines after the offset
-- slicing is line-based within chapter content, not by absolute file line numbers
-
-Example:
-
-```json
-{
-  "count": 1,
-  "results": [
-    {
-      "category": "code",
-      "files": [
-        {
-          "file": "src/chapter_mcp/index.py",
-          "chapters": [
-            {
-              "name": "read_chapter",
-              "start_line": 373,
-              "end_line": 414,
-              "content": "def read_chapter(\n    self,",
-              "content_offset": 0,
-              "content_total_lines": 12,
-              "content_truncated": true
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
-Column mode for high-volume listing:
-
-- allowed `fields`: `name`, `start_line`, `end_line`
-- default `fields`: `name`, `start_line`, `end_line`
-- results stay grouped by `category` and `file`
-- this costs a small amount of extra JSON overhead compared to a fully flat table
-- the grouping is intentional because it avoids repeating file paths per row and keeps follow-up reads easier
-
-Example:
-
-```json
-{
-  "results": [
-    {
-      "category": "code",
-      "files": [
-        {
-          "file": "src/chapter_mcp/chunks.py",
-          "columns": ["name", "start_line", "end_line"],
-          "rows": [
-            ["Chunk", 9, 15]
-          ]
-        }
-      ]
-    }
-  ],
-  "truncated": false
-}
-```
-
-Example with explicit fields:
-
-## Using chapter-mcp with Serena, rg, and sed
-
-`chapter-mcp` is a lightweight, fresh, chapter-based context layer for agent workflows. It complements Serena and shell tools instead of replacing them.
-
-- Use `chapter-mcp` for indexed project context such as docs, README files, help text, instructions, ADRs, Markdown/TXT, and optionally chapterized source sections.
-- Prefer `chapter-mcp` for exploratory or relevance-ranked search. It returns ranked sections with path, `start_line`, `end_line`, `name`, optional `kind`, and optional `score`.
-- For Markdown, TXT, and docs, normal full-text chapter search is usually the right default.
-- Do not use `chapter-mcp` as an exact source-code matcher. SQLite FTS5 tokenization is a poor fit for exact literals in code and formal languages, especially when special characters, paths, routes, punctuation, or operators matter.
-- Use Serena for symbol-aware work such as definitions, references, implementations, diagnostics, and symbol-level edits.
-- Use `rg` for exact literals, identifiers, routes, config keys, error messages, regex searches, non-indexed files, and raw verification after edits.
-- Use `sed` when you already know the path and line range and need the raw source text.
-- `read_chapter` with `content_offset` and `content_limit` can replace many `sed` reads for indexed docs and chapterized sections.
-- `chapter-mcp` is designed to keep its index fresh automatically during an agent session, so manual reindexing should rarely be needed.
-
-Tool selection:
-
-- Use `chapter-mcp` when the question is:
-  - "Which project section is relevant?"
-  - "Where is this behavior documented?"
-  - "What guidance applies before editing?"
-  - "Find the best matching chapter or section for this task."
-- Use Serena when the question is:
-  - "Where is this symbol defined?"
-  - "Who references this function or type?"
-  - "What implementations exist?"
-  - "Can this symbol or body be edited safely?"
-- Use `rg` when the question is:
-  - "Does this exact literal occur?"
-  - "Where is this error message, route, or config key?"
-  - "I need regex or raw text verification."
-- Use `sed` when:
-  - "I already know the path and line range and need the raw source text."
-
-Example flow:
-
-1. Use `chapter-mcp` to find the relevant docs, instructions, or section.
-2. Use Serena if symbols, references, or diagnostics are involved.
-3. Use `read_chapter` with limits for indexed chapters, or `sed` for raw source ranges.
-4. Use `rg` for exact literal or regex verification.
-
-```json
-{
-  "results": [
-    {
-      "category": "code",
-      "files": [
-        {
-          "file": "src/chapter_mcp/chunks.py",
-          "columns": ["name"],
-          "rows": [
-            ["Chunk"]
-          ]
-        }
-      ]
-    }
-  ],
-  "truncated": false
-}
-```
-
-Use `read_search` when you want to open the best full chapter match directly:
-
-- `read_search("json content-type header")`
-- `read_search("Routing")`
-- `read_search("Find files by extension", category="common")`
-
-## Library Usage
-
-```python
-from pathlib import Path
-
-from chapter_mcp import ChapterIndex
-
-index = ChapterIndex(
-    Path.cwd(),
-    Path(".chapter-mcp/index.sqlite3"),
-    category_paths=["docs", "examples"],
-)
-
-index.reindex()
-print(index.search("install"))
-print(index.search_chapter("Guide"))
-print(index.read_search("install"))
-index.close()
-```
-
-## MCP Usage
-
-```sh
-uv run chapter-mcp \
-  --path instructions \
-  --path knowledge \
-  --sync-startup
-```
-
-Then call tools such as:
-- `list_files()`
-- `list_chapters()`
-- `list_chapters_as_columns(fields=["name"])`
-- `search("config handling", category="instructions", limit=3)`
-- `search_chapter("Style guide", category="instructions", limit=3)`
-- `read_search("config handling", category="instructions")`
-- `read_chapter("Style guide", file="instructions/style-guide.md")`
-- `read_chapter("Style guide", file="instructions/style-guide.md", content_offset=0, content_limit=20)`
-
-Workspace MCP config:
-- `.codex/config.toml` configures the server for project-local Codex usage.
-- `.chapter-mcp/config.json` defines what a given project indexes.
-- `.mcp.json` can stay generic and only describe how to launch the server.
-
-## Codex Setup
-
-If project-local `.codex/config.toml` works in your Codex environment, prefer that.
-
-If your Codex surface only reliably loads global MCP config, you can still keep folder selection project-specific by using one generic global server entry and storing the actual index configuration in each repo's `.chapter-mcp/config.json`.
-
-Example global Codex config:
+Add a project-local Codex MCP entry, for example in `.codex/config.toml`:
 
 ```toml
 [mcp_servers.chapter-mcp]
-command = "/opt/homebrew/bin/uv"
-args = [
-  "run",
-  "python",
-  "-m",
-  "chapter_mcp",
-  "--root",
-  ".",
-]
+command = "uvx"
+args = ["chapter-mcp", "--root", "."]
 cwd = "."
 startup_timeout_sec = 20
 required = false
 ```
 
-With that setup, `chapter-mcp` starts in the current workspace and reads per-project index settings from `.chapter-mcp/config.json` automatically when no `--path` flags are passed directly.
+Then add instructions in `AGENTS.md` so Codex actually reaches for the tool:
 
-Example project `.chapter-mcp/config.json`:
+```md
+## Project context
+
+Use `chapter-mcp` before broad file reads when looking for project docs,
+instructions, README sections, ADRs, or chapterized source sections.
+
+Prefer this flow:
+1. Search with `chapter-mcp` to find the relevant section.
+2. Read the matching chapter or a small slice of it.
+3. Use Serena for symbol definitions, references, diagnostics, and safe edits.
+4. For literal code/config queries, pass `exact_code_matches=true` to
+   `search` or `read_search`.
+5. Use `rg` when you need exhaustive exact matching, absence checks, or
+   verification after edits.
+
+Use `chapter-mcp` for discovery and focused reads. Use `rg` as the final source
+of truth for repo-wide exact matching.
+```
+
+### Claude Code
+
+For Claude Code, add a project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "chapter-mcp": {
+      "command": "uvx",
+      "args": ["chapter-mcp", "--root", "${CLAUDE_PROJECT_DIR:-.}"]
+    }
+  }
+}
+```
+
+Or add it through Claude's MCP command:
+
+```sh
+claude mcp add-json chapter-mcp '{"command":"uvx","args":["chapter-mcp","--root","${CLAUDE_PROJECT_DIR:-.}"]}'
+```
+
+Then add instructions in `CLAUDE.md`:
+
+```md
+## Project context
+
+Use the `chapter-mcp` MCP server before reading large files. It is best for
+finding relevant README sections, docs, local instructions, ADRs, and
+chapterized source sections.
+
+Use `chapter-mcp` for discovery and focused chapter reads. Use normal file
+reads only after the relevant file or line range is known.
+
+For literal code/config queries, pass `exact_code_matches=true` to `search` or
+`read_search`. Use exact search tools such as `rg` for exhaustive repo-wide
+matching, absence checks, and verification after edits. Use language-aware tools
+for symbols.
+```
+
+### Optional project config
+
+Auto-discovery is the default. Add `.chapter-mcp/config.json` only when you want
+to pin categories, exclude noisy top-level folders, or index a specific set of
+paths:
 
 ```json
 {
   "paths": [
-    "code=src",
+    "docs=docs",
+    "src=src",
     "tests=tests",
     "readme=README.md"
   ]
 }
 ```
 
-## Limitations
+Supported config fields are `root`, `db`, `paths`, `watch`, `watch_interval`,
+and `sync_startup`. `paths` is required when using config. CLI flags override
+project config when both are present.
 
-`chapter-mcp` is deliberately FTS5-only.
-
-That means:
-- literal phrasing matters more than with vector search
-- broad conceptual queries may need better wording
-- unrelated wording will not be matched semantically
-- it does not do nearest-neighbor retrieval or semantic ranking
-
-This tradeoff is intentional: the project favors simple, fast, stable chapter
-lookup over more complex semantic retrieval behavior.
-
-## If You Need Vector Search
-
-If you actually need semantic/vector retrieval, evaluate a dedicated tool such
-as `txtai` separately.
-
-That can make sense when:
-- users ask fuzzy conceptual questions
-- wording often differs a lot from the indexed source text
-- you want a real RAG or semantic retrieval workflow
-
-`chapter-mcp` intentionally does not try to solve that problem.
-
-## MCP Inspector Example
+Useful server flags:
 
 ```sh
-npx @modelcontextprotocol/inspector \
-  uv run chapter-mcp \
-  --root /tmp/chapter-mcp-tldr \
-  --path common=pages/common \
-  --path instructions \
-  --sync-startup
+chapter-mcp --root .
+chapter-mcp --root . --path docs --path src
+chapter-mcp --root . --path knowledge=.serena/memories
+chapter-mcp --root . --no-watch
+chapter-mcp --root . --no-sync-startup
+chapter-mcp --root . --watch-interval 0.5
 ```
 
-Then in the Inspector `Tools` tab try:
-- `stats()`
-- `list_files()`
-- `search("json content-type header", category="common", limit=3)`
-- `search_chapter("curl", category="common", limit=3)`
-- `read_search("json content-type header", category="common")`
+## Use Case 2: Assistants and Agents
 
-## Optional TLDR Real-World Test
+The agent use case is similar, but the emphasis is different: `chapter-mcp`
+becomes a context-routing layer. When a task starts vague, the first move can be
+a small search over indexed chapters instead of a broad file read.
 
-The repository does not commit the TLDR archive. To run the optional real-world
-test locally:
+Recommended flow:
+
+1. Search local instructions and docs with `chapter-mcp`.
+2. Read the best chapter with `read_search(..., content_limit=40)` or
+   `read_chapter(..., content_limit=40)`.
+3. Switch to symbol tools if the task becomes code-aware.
+4. Use `rg` for exact verification.
+5. If you know a file and line, try `read_chapter_at` before a raw range read.
+6. Use raw reads only after the path and range are clear.
+
+This is especially useful when pairing `chapter-mcp` with tools such as Serena:
+
+- `chapter-mcp` answers "which section should I inspect?"
+- Serena answers "which symbol is this, and who references it?"
+- `rg` answers "where does this exact text occur?"
+- raw reads answer "what is the exact source in this known range?"
+
+### Minimal agent instruction block
+
+If you only want a small instruction, this is enough:
+
+```md
+Use `chapter-mcp` before broad file reads for indexed project context:
+README sections, docs, instructions, ADRs, Markdown/TXT files, and chapterized
+source sections.
+
+Use `read_chapter` with `content_limit` for focused reads. Use `rg` for exact
+literals and Serena/language tools for symbols and references. If you want code
+or config hits to contain the raw query exactly, pass `exact_code_matches=true`
+to `search` or `read_search`. If you know a file and approximate line, use
+`read_chapter_at` before reading a raw line range.
+```
+
+## Compared with file-read-mcp
+
+`file-read-mcp` is useful when the assistant already knows the file or range it
+needs. It is direct and close to the filesystem.
+
+`chapter-mcp` is useful one step earlier. It helps the assistant discover the
+right section before choosing what to read.
+
+In practice:
+
+- use `chapter-mcp` to search and shortlist relevant sections
+- use `read_chapter` to inspect the matching chapter without flooding context
+- use `file-read-mcp`, `sed`, or editor reads for exact raw ranges
+
+The distinction is small but important. `file-read-mcp` is about access.
+`chapter-mcp` is about choosing what is worth accessing.
+
+## MCP tools
+
+The server exposes `search`, `search_chapter`, `read_search`,
+`read_chapter_at`, `read_chapter`, `list_chapters`,
+`list_chapters_as_columns`, `list_files`, `stats`, and `reindex`.
+
+`search` and `read_search` also accept `exact_code_matches=false`. When set to
+`true`, docs keep normal FTS behavior, but code/config chapters must contain the
+raw query as an exact substring.
+
+`read_search`, `read_chapter_at`, and `read_chapter` accept `content_limit` for
+small first reads. `read_chapter_at` is useful when the alternative would be a
+raw line-range read and you want the indexed chapter around that line first.
+
+Example calls:
+
+```text
+stats()
+list_files()
+search("config handling", limit=3, include_snippet=True)
+search("extract-codex-session", exact_code_matches=True)
+search_chapter("Style guide", category="docs", limit=3)
+read_search("config handling", category="docs", content_limit=40)
+read_chapter_at(file="docs/style-guide.md", line=25, content_limit=40)
+read_chapter("Style guide", file="docs/style-guide.md", content_limit=40)
+list_chapters_as_columns(fields=["name"])
+```
+
+## Benchmark basics
+
+`chapter-mcp` does not measure savings inside the server. The benchmark helper
+summarizes observed tool traffic from outside the server so you can compare a
+baseline run with a chapter-first run.
+
+For Codex sessions, extract a neutral JSONL log from the latest session:
 
 ```sh
-curl -L https://github.com/tldr-pages/tldr/archive/refs/heads/main.zip -o /tmp/tldr-main.zip
-CHAPTER_MCP_TLDR_ZIP=/tmp/tldr-main.zip uv run pytest
+uv run chapter-mcp benchmark extract-codex-session --out baseline.jsonl
 ```
 
-If `CHAPTER_MCP_TLDR_ZIP` is not set, the TLDR-based test is skipped.
+Or pass a specific session log:
+
+```sh
+uv run chapter-mcp benchmark extract-codex-session \
+  ~/.codex/sessions/2026/05/25/example.jsonl \
+  --out chapter-first.jsonl
+```
+
+Summarize one run:
+
+```sh
+uv run chapter-mcp benchmark summarize baseline.jsonl
+```
+
+Compare two runs:
+
+```sh
+uv run chapter-mcp benchmark compare baseline.jsonl chapter-first.jsonl
+```
+
+The input format is deliberately simple JSONL:
+
+```jsonl
+{"tool":"sed","cmd":"rtk sed -n '1,220p' src/foo.py","chars_out":12340,"lines_out":220}
+{"tool":"rg","cmd":"rtk rg column src","chars_out":1840,"lines_out":35}
+{"tool":"chapter-mcp","call_name":"search","chars_out":2300,"lines_out":40}
+```
+
+Required fields are `tool` and `chars_out`. Optional fields include
+`bytes_out`, `lines_out`, `cmd`, `path`, `range`, and `timestamp`.
+
+The report is meant as a rough comparison, not a scientific token meter. It is
+most useful for spotting repeated broad reads and checking whether
+chapter-first workflows reduce raw file output.
+
+## Limits
+
+`chapter-mcp` is full-text search, not semantic search. Literal wording matters.
+If users ask fuzzy conceptual questions and the source uses very different
+phrasing, use a vector or RAG tool instead.
+
+It is also not an exact source-code matcher. SQLite FTS tokenization is not the
+right tool for punctuation-heavy code, operators, or paths. Use `rg` for that.
+
+The intended tradeoff is narrow and practical: fast local chapter lookup that
+keeps an assistant oriented before it reaches for heavier tools.
 
 ## Development
 
 ```sh
+uv sync
 uv run pytest
 ```

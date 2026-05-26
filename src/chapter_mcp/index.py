@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 from typing_extensions import NotRequired, TypedDict
 
 from chapter_mcp.chunks import Chunk, is_probably_text, parse_file
+from chapter_mcp.ignore_rules import IgnoreMatcher
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,18 @@ ALLOWED_CHAPTER_COLUMN_FIELDS: tuple[ChapterColumnField, ...] = (
     "name",
     "start_line",
     "end_line",
+)
+FORMAL_CHUNK_TYPES: tuple[str, ...] = (
+    "javascript_class",
+    "javascript_function",
+    "javascript_type",
+    "python_class",
+    "python_function",
+    "rust_function",
+    "rust_impl",
+    "rust_type",
+    "toml_section",
+    "yaml_section",
 )
 
 
@@ -64,13 +78,7 @@ class CategoryChapterRecord(TypedDict):
 
 class FileRecord(TypedDict):
     file: str
-    category: str
-    mtime_ns: int
-    mtime: str | None
-    byte_count: int
-    line_count: int
-    chunk_count: int
-    indexed_at: str | None
+    chapters: int
 
 
 class SearchResponse(TypedDict):
@@ -213,6 +221,8 @@ class ChapterIndex:
         self.root = root.expanduser().resolve()
         db_path = db_path.expanduser()
         self.db_path = db_path if db_path.is_absolute() else self.root / db_path
+        self._gitignore_matcher = IgnoreMatcher(self.root, ".gitignore")
+        self._aiignore_matcher = IgnoreMatcher(self.root, ".aiignore")
         self.category_dirs = self._resolve_category_dirs(category_paths)
         self._lock = threading.RLock()
         self._watch_stop = threading.Event()
@@ -343,13 +353,20 @@ class ChapterIndex:
         limit: int = 5,
         offset: int = 0,
         include_snippet: bool = False,
+        exact_code_matches: bool = False,
     ) -> SearchResponse:
         """Search chapter names and content and return lightweight matching chapter references."""
         limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
-        results = self._search_fts(query=query, category=category, limit=limit, offset=offset)
+        results = self._search_fts(
+            query=query,
+            category=category,
+            limit=limit,
+            offset=offset,
+            exact_code_matches=exact_code_matches,
+        )
         if include_snippet:
             self._add_search_snippets(results, query=query)
         return results
@@ -362,12 +379,27 @@ class ChapterIndex:
             raise ValueError(f"unknown category: {category}")
         return self._search_chapter_fts(query=query, category=category, limit=limit, offset=offset)
 
-    def read_search(self, query: str, category: str | None = None, offset: int = 0) -> ReadChapterResponse:
-        """Return the full chapter content for the ranked search match at the given offset."""
+    def read_search(
+        self,
+        query: str,
+        category: str | None = None,
+        offset: int = 0,
+        content_limit: int | None = None,
+        exact_code_matches: bool = False,
+    ) -> ReadChapterResponse:
+        """Return chapter content for the ranked search match at the given offset."""
         offset = max(0, offset)
+        if content_limit is not None and content_limit < 1:
+            raise ValueError("content_limit must be greater than zero")
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
-        matches = self._search_fts(query=query, category=category, limit=1, offset=offset)
+        matches = self._search_fts(
+            query=query,
+            category=category,
+            limit=1,
+            offset=offset,
+            exact_code_matches=exact_code_matches,
+        )
         if not matches["results"]:
             return {"count": matches["count"], "results": []}
 
@@ -375,11 +407,57 @@ class ChapterIndex:
         category = match["category"]
         file_record = match["files"][0]
         chapter_record = file_record["chapters"][0]
-        chapter = self.read_chapter(chapter_record["name"], file=file_record["file"], category=category, count=1, offset=0)
+        chapter = self.read_chapter(
+            chapter_record["name"],
+            file=file_record["file"],
+            category=category,
+            count=1,
+            offset=0,
+            content_limit=content_limit,
+        )
         return {
             "count": matches["count"],
             "results": chapter["results"],
         }
+
+    def read_chapter_at(
+        self,
+        file: str,
+        line: int,
+        category: str | None = None,
+        content_limit: int | None = None,
+    ) -> ReadChapterResponse:
+        """Return the indexed chapter containing a file line, optionally narrowed by category."""
+        line = max(1, line)
+        if content_limit is not None and content_limit < 1:
+            raise ValueError("content_limit must be greater than zero")
+        if category is not None and category not in self.category_dirs:
+            raise ValueError(f"unknown category: {category}")
+        clauses = ["file_path = ?", "start_line <= ?", "end_line >= ?"]
+        params: list[Any] = [file, line, line]
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(category)
+        where = " and ".join(clauses)
+        with self._lock:
+            rows = self.db.execute(
+                f"""
+                select file_path, category, chunk_type, chunk_name, content, start_line, end_line
+                from chunks
+                where {where}
+                order by (end_line - start_line) asc, start_line desc, category, file_path
+                limit 1
+                """,
+                params,
+            ).fetchall()
+            return {
+                "count": len(rows),
+                "results": _group_chapter_rows(
+                    rows,
+                    include_content=True,
+                    content_limit=content_limit,
+                ),
+            }
 
     def read_chapter(
         self,
@@ -525,7 +603,7 @@ class ChapterIndex:
             }
 
     def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
-        """List indexed files and return metadata such as category, size, and chunk counts."""
+        """List indexed files with their number of chapters."""
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         with self._lock:
@@ -541,16 +619,11 @@ class ChapterIndex:
                 f"""
                 select
                     files.path,
-                    files.category,
-                    files.mtime_ns,
-                    files.size,
-                    files.line_count,
-                    files.indexed_at,
-                    count(chunks.id) as chunk_count
+                    count(chunks.id) as chapters
                 from files
                 left join chunks on chunks.file_path = files.path
                 where files.category in ({placeholders})
-                group by files.path
+                group by files.path, files.category
                 order by files.category, files.path
                 limit ? offset ?
                 """,
@@ -684,13 +757,21 @@ class ChapterIndex:
             with self._lock:
                 self._last_background_error = repr(error)
 
-    def _search_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
+    def _search_fts(
+        self,
+        query: str,
+        category: str | None,
+        limit: int,
+        offset: int,
+        exact_code_matches: bool = False,
+    ) -> SearchResponse:
         return self._search_fts_columns(
             query=query,
             category=category,
             limit=limit,
             offset=offset,
             match_column=None,
+            exact_code_matches=exact_code_matches,
         )
 
     def _search_chapter_fts(self, query: str, category: str | None, limit: int, offset: int) -> SearchResponse:
@@ -710,22 +791,36 @@ class ChapterIndex:
         limit: int,
         offset: int,
         match_column: str | None,
+        exact_code_matches: bool = False,
     ) -> SearchResponse:
         fts_query = _fts_query(query)
         match_expression = f"{match_column} : {fts_query}" if match_column is not None else fts_query
+        exact_filter = ""
+        exact_params: list[Any] = []
+        if exact_code_matches:
+            placeholders = ", ".join("?" for _ in FORMAL_CHUNK_TYPES)
+            exact_filter = f"""
+                  and (
+                      chunks.chunk_type not in ({placeholders})
+                      or instr(chunks.chunk_name, ?) > 0
+                      or instr(chunks.content, ?) > 0
+                  )
+                """
+            exact_params = [*FORMAL_CHUNK_TYPES, query, query]
         with self._lock:
             count_row = self.db.execute(
-                """
+                f"""
                 select count(*) as count
                 from chunks_fts
                 join chunks on chunks.id = chunks_fts.rowid
                 where chunks_fts match ?
                   and (? is null or chunks.category = ?)
+                  {exact_filter}
                 """,
-                [match_expression, category, category],
+                [match_expression, category, category, *exact_params],
             ).fetchone()
             rows = self.db.execute(
-                """
+                f"""
                 select
                     chunks.file_path,
                     chunks.category,
@@ -737,10 +832,11 @@ class ChapterIndex:
                 join chunks on chunks.id = chunks_fts.rowid
                 where chunks_fts match ?
                   and (? is null or chunks.category = ?)
+                  {exact_filter}
                 order by bm25(chunks_fts)
                 limit ? offset ?
                 """,
-                [match_expression, category, category, limit, offset],
+                [match_expression, category, category, *exact_params, limit, offset],
             ).fetchall()
             return {
                 "count": count_row["count"] if count_row is not None else 0,
@@ -905,7 +1001,9 @@ class ChapterIndex:
         self.db.execute("delete from files where path = ?", [rel_path])
 
     def _resolve_category_dirs(self, category_paths: Sequence[CategoryPath] | None) -> dict[str, tuple[Path, ...]]:
-        configured_paths = category_paths or ()
+        if category_paths is None:
+            return self._discover_category_dirs()
+        configured_paths = category_paths
         category_dirs: dict[str, list[Path]] = {}
         resolved_paths: list[tuple[str, Path]] = []
         for configured_path in configured_paths:
@@ -927,6 +1025,23 @@ class ChapterIndex:
             resolved_paths.append((category, directory))
         return {category: tuple(paths) for category, paths in category_dirs.items()}
 
+    def _discover_category_dirs(self) -> dict[str, tuple[Path, ...]]:
+        discovered: dict[str, Path] = {}
+        for path in sorted(self.root.iterdir()):
+            if path.name.startswith(".") or path.name == ".chapter-mcp":
+                continue
+            if self._gitignore_matcher.matches(path, path) or self._aiignore_matcher.matches(path, path):
+                continue
+            if path.is_file():
+                try:
+                    sample = path.read_bytes()[:4096]
+                except OSError:
+                    continue
+                if not is_probably_text(path, sample):
+                    continue
+            discovered[path.name] = path
+        return {category: (path,) for category, path in discovered.items()}
+
     def _iter_category_files(self, category: str) -> list[tuple[Path, Path]]:
         files: list[tuple[Path, Path]] = []
         for category_root in self.category_dirs[category]:
@@ -936,10 +1051,7 @@ class ChapterIndex:
                 if not self._should_skip_path(category_root, category_root):
                     files.append((category_root, category_root))
                 continue
-            for path in sorted(category_root.rglob("*")):
-                if not path.is_file() or self._should_skip_path(path, category_root):
-                    continue
-                files.append((path, category_root))
+            files.extend((path, category_root) for path in self._iter_files_in_dir(category_root, category_root))
         return files
 
     def _configured_paths_overlap(self, directory: Path, existing_directory: Path) -> bool:
@@ -960,6 +1072,43 @@ class ChapterIndex:
             raise ValueError(f"unknown category: {category}")
         return (category,)
 
+    def _iter_files_in_dir(self, directory: Path, category_dir: Path) -> list[Path]:
+        files: list[Path] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in sorted(entries, key=lambda item: item.name):
+                    path = Path(entry.path)
+                    if entry.is_dir():
+                        if self._should_skip_dir(path, category_dir):
+                            continue
+                        files.extend(self._iter_files_in_dir(path, category_dir))
+                        continue
+                    if not entry.is_file() or self._should_skip_path(path, category_dir):
+                        continue
+                    files.append(path)
+        except OSError:
+            return files
+        return files
+
+    def _should_skip_dir(self, path: Path, category_dir: Path) -> bool:
+        if category_dir.is_file():
+            rel_parts = (path.name,)
+        else:
+            try:
+                rel_parts = path.relative_to(category_dir).parts
+            except ValueError:
+                return True
+        if any(part.startswith(".") for part in rel_parts):
+            return True
+        if self._gitignore_matcher.matches(path, category_dir):
+            return True
+        if self._aiignore_matcher.matches(path, category_dir):
+            return True
+        try:
+            return path.resolve() == self.db_path.resolve()
+        except OSError:
+            return True
+
     def _should_skip_path(self, path: Path, category_dir: Path) -> bool:
         if category_dir.is_file():
             rel_parts = (path.name,)
@@ -969,6 +1118,10 @@ class ChapterIndex:
             except ValueError:
                 return True
         if any(part.startswith(".") for part in rel_parts):
+            return True
+        if self._gitignore_matcher.matches(path, category_dir):
+            return True
+        if self._aiignore_matcher.matches(path, category_dir):
             return True
         try:
             if path.resolve() == self.db_path.resolve():
@@ -1022,13 +1175,7 @@ def _format_timestamp(timestamp: float | None) -> str | None:
 def _file_row_to_result(row: sqlite3.Row) -> FileRecord:
     return {
         "file": row["path"],
-        "category": row["category"],
-        "mtime_ns": row["mtime_ns"],
-        "mtime": _format_mtime_ns(row["mtime_ns"]),
-        "byte_count": row["size"],
-        "line_count": row["line_count"],
-        "chunk_count": row["chunk_count"],
-        "indexed_at": _format_timestamp(row["indexed_at"]),
+        "chapters": row["chapters"],
     }
 
 

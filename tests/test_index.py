@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 from chapter_mcp.index import ChapterIndex
+from chapter_mcp.ignore_rules import IgnoreMatcher, _matches_ignore_rule
 from chapter_mcp.server import create_app
 
 
@@ -88,13 +89,7 @@ def test_index_reindex_search_read_chapter_list_chapters_and_cleanup(tmp_path: P
         files = index.list_files()
         assert files["count"] == 2
         alpha_file = next(file for file in files["files"] if file["file"] == "knowledge/alpha.md")
-        assert alpha_file["category"] == "knowledge"
-        assert alpha_file["line_count"] == 2
-        assert alpha_file["byte_count"] == (tmp_path / "knowledge" / "alpha.md").stat().st_size
-        assert alpha_file["chunk_count"] == 1
-        assert alpha_file["mtime_ns"] == (tmp_path / "knowledge" / "alpha.md").stat().st_mtime_ns
-        assert alpha_file["mtime"] is not None
-        assert alpha_file["indexed_at"] is not None
+        assert alpha_file["chapters"] == 1
 
         stats = index.stats()
         assert stats["file_count"] == 2
@@ -144,6 +139,38 @@ def test_search_can_include_compact_snippet(tmp_path: Path) -> None:
         assert "JSON Content-Type header" in first_chapter(result)["snippet"]
         assert len(first_chapter(result)["snippet"]) <= 120
         assert "content" not in first_chapter(result)
+    finally:
+        index.close()
+
+
+def test_search_exact_code_matches_filters_formal_language_hits_only(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "notes.md",
+        "# Sessions\nExtract the latest Codex session log before comparing runs.\n",
+    )
+    write(
+        tmp_path / "src" / "tools.py",
+        "def extract_codex_session_to_jsonl() -> None:\n"
+        "    \"\"\"Extract a Codex session log.\"\"\"\n"
+        "    return None\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs", "src"])
+
+    try:
+        index.reindex()
+
+        loose = index.search("extract codex session", limit=10)
+        loose_files = {file["file"] for category in loose["results"] for file in category["files"]}
+        assert loose_files == {"docs/notes.md", "src/tools.py"}
+
+        exact = index.search("extract codex session", limit=10, exact_code_matches=True)
+        exact_files = {file["file"] for category in exact["results"] for file in category["files"]}
+        assert exact_files == {"docs/notes.md"}
+        assert exact["count"] == 1
+
+        exact_literal = index.search("extract_codex_session", limit=10, exact_code_matches=True)
+        exact_literal_files = {file["file"] for category in exact_literal["results"] for file in category["files"]}
+        assert exact_literal_files == {"src/tools.py"}
     finally:
         index.close()
 
@@ -290,6 +317,25 @@ def test_read_search_returns_full_chapter_for_title_and_content_matches(tmp_path
         index.close()
 
 
+def test_read_search_can_limit_content(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\none\ntwo\nthree\n")
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_search("alpha", content_limit=2)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["content"] == "# Alpha\none"
+        assert first_chapter(chapter)["content_offset"] == 0
+        assert first_chapter(chapter)["content_total_lines"] == 4
+        assert first_chapter(chapter)["content_truncated"] is True
+
+        with pytest.raises(ValueError, match="content_limit must be greater than zero"):
+            index.read_search("alpha", content_limit=0)
+    finally:
+        index.close()
+
+
 def test_read_chapter_can_slice_content_by_lines(tmp_path: Path) -> None:
     write(
         tmp_path / "docs" / "alpha.py",
@@ -320,6 +366,48 @@ def test_read_chapter_content_slice_can_return_tail_without_truncation_when_exac
         assert first_chapter(chapter)["content_offset"] == 2
         assert first_chapter(chapter)["content_total_lines"] == 3
         assert first_chapter(chapter)["content_truncated"] is True
+    finally:
+        index.close()
+
+
+def test_read_chapter_at_returns_chapter_containing_line(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "guide.md",
+        "# Intro\nWelcome.\n\n## Setup\nInstall it.\nConfigure it.\n\n## Usage\nRun it.\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_chapter_at("docs/guide.md", line=5, content_limit=2)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["name"] == "Intro > Setup"
+        assert first_chapter(chapter)["start_line"] == 4
+        assert first_chapter(chapter)["end_line"] == 7
+        assert first_chapter(chapter)["content"] == "## Setup\nInstall it."
+        assert first_chapter(chapter)["content_truncated"] is True
+
+        assert index.read_chapter_at("docs/guide.md", line=20) == {"count": 0, "results": []}
+        with pytest.raises(ValueError, match="content_limit must be greater than zero"):
+            index.read_chapter_at("docs/guide.md", line=5, content_limit=0)
+    finally:
+        index.close()
+
+
+def test_read_chapter_at_prefers_tightest_containing_chapter(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "guide.md",
+        "# Intro\nWelcome.\n\n## Setup\nInstall it.\n\n### Linux\nUse apt.\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_chapter_at("docs/guide.md", line=8)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["name"] == "Intro > Setup > Linux"
+        assert first_chapter(chapter)["start_line"] == 7
+        assert first_chapter(chapter)["end_line"] == 8
     finally:
         index.close()
 
@@ -522,14 +610,135 @@ def test_multiple_paths_can_share_one_category(tmp_path: Path) -> None:
         index.close()
 
 
-def test_no_configured_paths_indexes_nothing(tmp_path: Path) -> None:
+def test_no_configured_paths_indexes_visible_project_files(tmp_path: Path) -> None:
     write(tmp_path / "knowledge" / "alpha.md", "# Alpha\nAlpha note.")
+    write(tmp_path / ".hidden" / "secret.md", "# Secret\nHidden note.")
     index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
 
     try:
         stats = index.reindex()
-        assert stats.as_dict() == {"scanned": 0, "indexed": 0, "skipped": 0, "deleted": 0}
-        assert index.search("alpha", limit=1) == {"count": 0, "results": []}
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "knowledge/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_default_indexing_respects_gitignore(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "ignored" / "secret.md", "# Secret\nIgnored note.")
+    write(tmp_path / ".gitignore", "ignored/\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_nested_gitignore_can_reinclude_files(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "draft.md", "# Draft\nHidden note.")
+    write(tmp_path / "docs" / "keep.md", "# Keep\nVisible note.")
+    write(tmp_path / "docs" / ".gitignore", "*.md\n!keep.md\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
+        assert index.search("draft", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_default_indexing_respects_aiignore(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "ignored" / "secret.md", "# Secret\nIgnored note.")
+    write(tmp_path / ".aiignore", "ignored/\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_nested_aiignore_can_reinclude_files(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "draft.md", "# Draft\nHidden note.")
+    write(tmp_path / "docs" / "keep.md", "# Keep\nVisible note.")
+    write(tmp_path / "docs" / ".aiignore", "*.md\n!keep.md\n")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
+        assert index.search("draft", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
+
+
+def test_ignore_matcher_reload_rules_after_ignore_file_changes(tmp_path: Path) -> None:
+    write(tmp_path / ".gitignore", "ignored/\n")
+    matcher = IgnoreMatcher(tmp_path, ".gitignore")
+    ignored_path = tmp_path / "ignored" / "secret.md"
+    write(ignored_path, "# Secret\n")
+
+    assert matcher.matches(ignored_path, tmp_path) is True
+
+    write(tmp_path / ".gitignore", "")
+
+    assert matcher.matches(ignored_path, tmp_path) is False
+
+
+def test_directory_only_basename_rule_matches_named_directory_and_descendants() -> None:
+    assert _matches_ignore_rule(
+        pattern="ignored",
+        relative_path="ignored/secret.md",
+        anchored=False,
+        directory_only=True,
+    ) is True
+
+
+def test_anchored_basename_rule_does_not_match_parent_directory_names() -> None:
+    assert _matches_ignore_rule(
+        pattern="keep",
+        relative_path="keep/file.md",
+        anchored=True,
+        directory_only=False,
+    ) is False
+
+
+def test_reindex_prunes_ignored_directories_before_recursing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(tmp_path / ".gitignore", "node_modules/\n")
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "node_modules" / "pkg" / "secret.md", "# Secret\nIgnored note.")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+    original_scandir = os.scandir
+
+    def fail_on_node_modules(path: os.PathLike[str] | str) -> os.ScandirIterator[str]:
+        if Path(path).name == "node_modules":
+            raise AssertionError("unexpected recursion into ignored directory")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", fail_on_node_modules)
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
     finally:
         index.close()
 
@@ -549,7 +758,7 @@ def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:
         else:
             raise AssertionError("file metadata was not available before indexing finished")
         assert listed["files"][0]["file"] == "docs/alpha.md"
-        assert listed["files"][0]["chunk_count"] == 1
+        assert listed["files"][0]["chapters"] == 1
         stats = app.chapter_index.stats()  # type: ignore[attr-defined]
         assert stats["startup_index_running"] is True or stats["last_reindex"] is not None
         app.chapter_index.wait_for_startup(timeout=2)  # type: ignore[attr-defined]
