@@ -12,7 +12,7 @@ class IgnoreMatcher:
     def __init__(self, root: Path, ignore_filename: str) -> None:
         self.root = root
         self.ignore_filename = ignore_filename
-        self._cache: dict[Path, tuple[IgnoreRule, ...]] = {}
+        self._cache: dict[Path, tuple[tuple[IgnoreRule, ...], float | None]] = {}
 
     def matches(self, path: Path, category_dir: Path) -> bool:
         matched = False
@@ -57,13 +57,18 @@ class IgnoreMatcher:
 
     def _load_rules(self, directory: Path) -> tuple[IgnoreRule, ...]:
         cached = self._cache.get(directory)
-        if cached is not None:
-            return cached
-
         ignore_path = directory / self.ignore_filename
+        try:
+            mtime = ignore_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if cached is not None:
+            cached_rules, cached_mtime = cached
+            if cached_mtime == mtime:
+                return cached_rules
         if not ignore_path.is_file():
             rules: tuple[IgnoreRule, ...] = ()
-            self._cache[directory] = rules
+            self._cache[directory] = (rules, mtime)
             return rules
 
         parsed_rules: list[IgnoreRule] = []
@@ -71,7 +76,7 @@ class IgnoreMatcher:
             contents = ignore_path.read_text(encoding="utf-8")
         except OSError:
             rules = ()
-            self._cache[directory] = rules
+            self._cache[directory] = (rules, mtime)
             return rules
 
         for raw_line in contents.splitlines():
@@ -94,7 +99,7 @@ class IgnoreMatcher:
             parsed_rules.append((negate, anchored, directory_only, line))
 
         rules = tuple(parsed_rules)
-        self._cache[directory] = rules
+        self._cache[directory] = (rules, mtime)
         return rules
 
 
@@ -106,9 +111,10 @@ def _matches_ignore_rule(*, pattern: str, relative_path: str, anchored: bool, di
     if "/" not in pattern:
         basename_candidates = [normalized_path.name]
         basename_candidates.extend(directory.name for directory in normalized_path.parents if directory.name)
+        basename_scope = basename_candidates[:1] if anchored else basename_candidates
         if directory_only:
-            return any(fnmatch.fnmatchcase(name, pattern) for name in basename_candidates[1:])
-        return any(fnmatch.fnmatchcase(name, pattern) for name in basename_candidates)
+            return any(fnmatch.fnmatchcase(name, pattern) for name in basename_scope[1 if not anchored else 0 :])
+        return any(fnmatch.fnmatchcase(name, pattern) for name in basename_scope)
 
     if directory_only:
         return any(fnmatch.fnmatchcase(candidate, pattern) for candidate in directory_candidates)

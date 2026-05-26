@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from chapter_mcp import cli
-from chapter_mcp.benchmark import compare_logs, estimate_tokens, extract_codex_session_to_jsonl, summarize_log
+from chapter_mcp.benchmark import compare_logs, estimate_tokens, extract_codex_session_to_jsonl, load_records, summarize_log
 
 
 def write_jsonl(path: Path, lines: list[dict[str, object]]) -> None:
@@ -142,6 +142,17 @@ def test_benchmark_cli_rejects_invalid_jsonl(tmp_path: Path, monkeypatch) -> Non
         cli.main()
 
     assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("field", ["chars_out", "bytes_out", "lines_out"])
+def test_load_records_rejects_negative_output_counters(tmp_path: Path, field: str) -> None:
+    log_path = tmp_path / "invalid.jsonl"
+    payload: dict[str, object] = {"tool": "rg", "chars_out": 10}
+    payload[field] = -1
+    write_jsonl(log_path, [payload])
+
+    with pytest.raises(ValueError, match=rf"{field} must be non-negative, got -1"):
+        load_records(log_path)
 
 
 def test_extract_codex_session_to_jsonl_normalizes_exec_and_mcp_tools(tmp_path: Path) -> None:

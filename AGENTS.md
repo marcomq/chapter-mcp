@@ -3,7 +3,7 @@
 ## Using chapter-mcp with Serena, rg, and sed
 
 - Use `chapter-mcp` first for indexed, relevance-ranked project context such as docs, instructions, README files, ADRs, Markdown/TXT, and chapterized source sections.
-- Use Serena for symbol-aware work: definitions, references, implementations, diagnostics, and safe symbol edits.
+- Use Serena for symbol-aware work: references, implementations, diagnostics, and safe symbol edits.
 - Use `rtk rg` for exact literals, identifiers, routes, config keys, error messages, regex searches, non-indexed files, and raw verification.
 - Use `read_chapter(..., content_limit=...)` for indexed section reads. Start with a small block and abort early if the returned chapter or line range is not the one you need.
 - Use `read_search(..., content_limit=...)` to open a best search match with bounded content.
@@ -13,7 +13,7 @@
 - Avoid broad or repeated `sed` reads. Narrow with `chapter-mcp`, Serena, or `rtk rg` first.
 
 Tool order for this repo:
-1. Use `chapter-mcp` first for README, docs, ADRs, instructions, and chapterized content discovery.
+1. Use `chapter-mcp` first for content discovery.
 2. Use Serena first for symbol-aware code lookup, references, and edits.
 3. Use `rtk rg` for exact literals, regex, absence checks, and verification.
 4. Use `rtk sed` only after the file and approximate line range are already known.

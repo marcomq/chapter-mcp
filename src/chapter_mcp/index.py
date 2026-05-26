@@ -450,7 +450,7 @@ class ChapterIndex:
                 select file_path, category, chunk_type, chunk_name, content, start_line, end_line
                 from chunks
                 where {where}
-                order by category, file_path, start_line
+                order by (end_line - start_line) asc, start_line desc, category, file_path
                 limit 1
                 """,
                 params,

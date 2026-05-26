@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 from chapter_mcp.index import ChapterIndex
+from chapter_mcp.ignore_rules import IgnoreMatcher, _matches_ignore_rule
 from chapter_mcp.server import create_app
 
 
@@ -399,6 +400,24 @@ def test_read_chapter_at_returns_chapter_containing_line(tmp_path: Path) -> None
         index.close()
 
 
+def test_read_chapter_at_prefers_tightest_containing_chapter(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "guide.md",
+        "# Intro\nWelcome.\n\n## Setup\nInstall it.\n\n### Linux\nUse apt.\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_chapter_at("docs/guide.md", line=8)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["name"] == "Intro > Setup > Linux"
+        assert first_chapter(chapter)["start_line"] == 7
+        assert first_chapter(chapter)["end_line"] == 8
+    finally:
+        index.close()
+
+
 def test_read_chapter_rejects_non_positive_content_limit(tmp_path: Path) -> None:
     write(tmp_path / "docs" / "alpha.md", "# Alpha\none\ntwo\n")
     index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
@@ -673,6 +692,28 @@ def test_nested_aiignore_can_reinclude_files(tmp_path: Path) -> None:
         assert index.search("draft", limit=1) == {"count": 0, "results": []}
     finally:
         index.close()
+
+
+def test_ignore_matcher_reload_rules_after_ignore_file_changes(tmp_path: Path) -> None:
+    write(tmp_path / ".gitignore", "ignored/\n")
+    matcher = IgnoreMatcher(tmp_path, ".gitignore")
+    ignored_path = tmp_path / "ignored" / "secret.md"
+    write(ignored_path, "# Secret\n")
+
+    assert matcher.matches(ignored_path, tmp_path) is True
+
+    write(tmp_path / ".gitignore", "")
+
+    assert matcher.matches(ignored_path, tmp_path) is False
+
+
+def test_anchored_basename_rule_does_not_match_parent_directory_names() -> None:
+    assert _matches_ignore_rule(
+        pattern="keep",
+        relative_path="keep/file.md",
+        anchored=True,
+        directory_only=False,
+    ) is False
 
 
 def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:

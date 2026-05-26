@@ -29,25 +29,30 @@ def estimate_tokens(chars_out: int, *, chars_per_token: float = DEFAULT_CHARS_PE
 def load_records(path: Path) -> list[dict[str, Any]]:
     """Load neutral JSONL records from disk."""
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            raw = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid JSONL in {path} on line {line_number}: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected an object")
-        if "tool" not in raw or "chars_out" not in raw:
-            raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected tool and chars_out")
-        raw["tool"] = str(raw["tool"])
-        raw["chars_out"] = int(raw["chars_out"])
-        if "bytes_out" in raw and raw["bytes_out"] is not None:
-            raw["bytes_out"] = int(raw["bytes_out"])
-        if "lines_out" in raw and raw["lines_out"] is not None:
-            raw["lines_out"] = int(raw["lines_out"])
-        records.append(raw)
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                raw = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSONL in {path} on line {line_number}: {exc}") from exc
+            if not isinstance(raw, dict):
+                raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected an object")
+            if "tool" not in raw or "chars_out" not in raw:
+                raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected tool and chars_out")
+            raw["tool"] = str(raw["tool"])
+            for key in ("chars_out", "bytes_out", "lines_out"):
+                if key not in raw or raw[key] is None:
+                    continue
+                value = int(raw[key])
+                if value < 0:
+                    raise ValueError(
+                        f"invalid JSONL in {path} on line {line_number}: {key} must be non-negative, got {value}"
+                    )
+                raw[key] = value
+            records.append(raw)
     return records
 
 
@@ -305,42 +310,43 @@ def extract_codex_session_records(session_log_path: Path) -> list[dict[str, Any]
     call_metadata: dict[str, dict[str, Any]] = {}
     records: list[dict[str, Any]] = []
 
-    for line_number, line in enumerate(session_log_path.read_text(encoding="utf-8").splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            entry = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid Codex session JSONL in {session_log_path} on line {line_number}: {exc}") from exc
-        if not isinstance(entry, dict):
-            raise ValueError(f"invalid Codex session JSONL in {session_log_path} on line {line_number}: expected an object")
-
-        entry_type = entry.get("type")
-        payload = entry.get("payload")
-        if entry_type != "response_item" or not isinstance(payload, dict):
-            continue
-
-        payload_type = payload.get("type")
-        if payload_type == "function_call":
-            call_id = _string_or_none(payload.get("call_id"))
-            if call_id is None:
+    with session_log_path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped:
                 continue
-            call_metadata[call_id] = {
-                "timestamp": entry.get("timestamp"),
-                "name": payload.get("name"),
-                "namespace": payload.get("namespace"),
-                "arguments": _load_json_object(payload.get("arguments")),
-            }
-            continue
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid Codex session JSONL in {session_log_path} on line {line_number}: {exc}") from exc
+            if not isinstance(entry, dict):
+                raise ValueError(f"invalid Codex session JSONL in {session_log_path} on line {line_number}: expected an object")
 
-        if payload_type != "function_call_output":
-            continue
-        call_id = _string_or_none(payload.get("call_id"))
-        output = payload.get("output")
-        if call_id is None or not isinstance(output, str):
-            continue
-        records.append(_codex_output_record(entry.get("timestamp"), output, call_metadata.get(call_id)))
+            entry_type = entry.get("type")
+            payload = entry.get("payload")
+            if entry_type != "response_item" or not isinstance(payload, dict):
+                continue
+
+            payload_type = payload.get("type")
+            if payload_type == "function_call":
+                call_id = _string_or_none(payload.get("call_id"))
+                if call_id is None:
+                    continue
+                call_metadata[call_id] = {
+                    "timestamp": entry.get("timestamp"),
+                    "name": payload.get("name"),
+                    "namespace": payload.get("namespace"),
+                    "arguments": _load_json_object(payload.get("arguments")),
+                }
+                continue
+
+            if payload_type != "function_call_output":
+                continue
+            call_id = _string_or_none(payload.get("call_id"))
+            output = payload.get("output")
+            if call_id is None or not isinstance(output, str):
+                continue
+            records.append(_codex_output_record(entry.get("timestamp"), output, call_metadata.get(call_id)))
 
     return records
 
