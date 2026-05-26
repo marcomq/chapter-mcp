@@ -149,7 +149,7 @@ def create_app(
 
     @mcp.tool
     def list_files(category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
-        """List indexed files and their index metadata."""
+        """List indexed files with their number of chapters."""
         return chapter_index.list_files(category=category, limit=limit, offset=offset)
 
     @mcp.tool

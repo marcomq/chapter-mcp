@@ -89,13 +89,7 @@ def test_index_reindex_search_read_chapter_list_chapters_and_cleanup(tmp_path: P
         files = index.list_files()
         assert files["count"] == 2
         alpha_file = next(file for file in files["files"] if file["file"] == "knowledge/alpha.md")
-        assert alpha_file["category"] == "knowledge"
-        assert alpha_file["line_count"] == 2
-        assert alpha_file["byte_count"] == (tmp_path / "knowledge" / "alpha.md").stat().st_size
-        assert alpha_file["chunk_count"] == 1
-        assert alpha_file["mtime_ns"] == (tmp_path / "knowledge" / "alpha.md").stat().st_mtime_ns
-        assert alpha_file["mtime"] is not None
-        assert alpha_file["indexed_at"] is not None
+        assert alpha_file["chapters"] == 1
 
         stats = index.stats()
         assert stats["file_count"] == 2
@@ -731,7 +725,7 @@ def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:
         else:
             raise AssertionError("file metadata was not available before indexing finished")
         assert listed["files"][0]["file"] == "docs/alpha.md"
-        assert listed["files"][0]["chunk_count"] == 1
+        assert listed["files"][0]["chapters"] == 1
         stats = app.chapter_index.stats()  # type: ignore[attr-defined]
         assert stats["startup_index_running"] is True or stats["last_reindex"] is not None
         app.chapter_index.wait_for_startup(timeout=2)  # type: ignore[attr-defined]

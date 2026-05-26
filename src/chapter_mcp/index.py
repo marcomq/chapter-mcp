@@ -77,13 +77,7 @@ class CategoryChapterRecord(TypedDict):
 
 class FileRecord(TypedDict):
     file: str
-    category: str
-    mtime_ns: int
-    mtime: str | None
-    byte_count: int
-    line_count: int
-    chunk_count: int
-    indexed_at: str | None
+    chapters: int
 
 
 class SearchResponse(TypedDict):
@@ -608,7 +602,7 @@ class ChapterIndex:
             }
 
     def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
-        """List indexed files and return metadata such as category, size, and chunk counts."""
+        """List indexed files with their number of chapters."""
         limit = max(1, min(limit, 500))
         offset = max(0, offset)
         with self._lock:
@@ -624,16 +618,11 @@ class ChapterIndex:
                 f"""
                 select
                     files.path,
-                    files.category,
-                    files.mtime_ns,
-                    files.size,
-                    files.line_count,
-                    files.indexed_at,
-                    count(chunks.id) as chunk_count
+                    count(chunks.id) as chapters
                 from files
                 left join chunks on chunks.file_path = files.path
                 where files.category in ({placeholders})
-                group by files.path
+                group by files.path, files.category
                 order by files.category, files.path
                 limit ? offset ?
                 """,
@@ -1151,13 +1140,7 @@ def _format_timestamp(timestamp: float | None) -> str | None:
 def _file_row_to_result(row: sqlite3.Row) -> FileRecord:
     return {
         "file": row["path"],
-        "category": row["category"],
-        "mtime_ns": row["mtime_ns"],
-        "mtime": _format_mtime_ns(row["mtime_ns"]),
-        "byte_count": row["size"],
-        "line_count": row["line_count"],
-        "chunk_count": row["chunk_count"],
-        "indexed_at": _format_timestamp(row["indexed_at"]),
+        "chapters": row["chapters"],
     }
 
 
