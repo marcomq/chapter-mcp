@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -48,7 +49,7 @@ def create_app(
         include_snippet: bool = False,
         exact_code_matches: bool = False,
     ) -> SearchResponse:
-        """Search indexed chapter names and content and return lightweight chapter references."""
+        """Search indexed chapter names and content before choosing what to read."""
         return chapter_index.search(
             query=query,
             category=category,
@@ -60,7 +61,7 @@ def create_app(
 
     @mcp.tool
     def search_chapter(query: str, category: str | None = None, limit: int = 5, offset: int = 0) -> SearchResponse:
-        """Search indexed chapter names only and return lightweight chapter references."""
+        """Search indexed chapter names only; useful when the section title is known or likely."""
         return chapter_index.search_chapter(query=query, category=category, limit=limit, offset=offset)
 
     @mcp.tool
@@ -68,14 +69,31 @@ def create_app(
         query: str,
         category: str | None = None,
         offset: int = 0,
+        content_limit: int | None = None,
         exact_code_matches: bool = False,
     ) -> ReadChapterResponse:
-        """Read the full chapter content for the ranked search match at the given offset."""
+        """Read the best search match directly; use content_limit for a small first read."""
         return chapter_index.read_search(
             query=query,
             category=category,
             offset=offset,
+            content_limit=content_limit,
             exact_code_matches=exact_code_matches,
+        )
+
+    @mcp.tool
+    def read_chapter_at(
+        file: str,
+        line: int,
+        category: str | None = None,
+        content_limit: int | None = None,
+    ) -> ReadChapterResponse:
+        """Read the indexed chapter containing a known file line before falling back to a raw range read."""
+        return chapter_index.read_chapter_at(
+            file=file,
+            line=line,
+            category=category,
+            content_limit=content_limit,
         )
 
     @mcp.tool
@@ -88,7 +106,7 @@ def create_app(
         content_offset: int = 0,
         content_limit: int | None = None,
     ) -> ReadChapterResponse:
-        """Read chapters by exact chapter name, optionally narrowed by file and category.
+        """Read indexed chapters by exact chapter name, optionally narrowed by file and category.
 
         `content_offset` and `content_limit` slice the stored chapter content by lines.
         """
@@ -109,7 +127,7 @@ def create_app(
         count: int = 5,
         offset: int = 0,
     ) -> ChapterListResponse:
-        """List indexed chapter names and line ranges without chapter content."""
+        """List indexed chapter names and line ranges before reading content."""
         return chapter_index.list_chapters(category=category, file=file, count=count, offset=offset)
 
     @mcp.tool
@@ -120,7 +138,7 @@ def create_app(
         offset: int = 0,
         fields: Sequence[str] | None = None,
     ) -> ChapterColumnsResponse:
-        """List indexed chapters as compact rows. `rows` follows the exact order of `columns`."""
+        """List indexed chapters as compact rows; use this when only names or line ranges are needed."""
         return chapter_index.list_chapters_as_columns(
             category=category,
             file=file,

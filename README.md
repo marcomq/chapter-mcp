@@ -50,24 +50,25 @@ assistant in a repo, and let discovery do the first pass.
 
 ## Install
 
-`chapter-mcp` is available on PyPI:
+`chapter-mcp` is available on PyPI. The quickest way to run it is with `uvx`:
 
 ```sh
-uv pip install chapter-mcp
+uvx chapter-mcp --root .
 ```
 
-For local development from this checkout:
+For a persistent install, use:
 
 ```sh
-uv sync
+uv tool install chapter-mcp
 ```
 
-For MCP clients, point at the installed `chapter-mcp` executable. From this
-checkout, that is usually:
+or:
 
-```text
-/absolute/path/to/chapter-mcp/.venv/bin/chapter-mcp
+```sh
+pip install chapter-mcp
 ```
+
+For local development from this checkout, see [Development](#development).
 
 ## Use Case 1: Local Development Project
 
@@ -84,8 +85,8 @@ Add a project-local Codex MCP entry, for example in `.codex/config.toml`:
 
 ```toml
 [mcp_servers.chapter-mcp]
-command = "/absolute/path/to/chapter-mcp/.venv/bin/chapter-mcp"
-args = ["--root", "."]
+command = "uvx"
+args = ["chapter-mcp", "--root", "."]
 cwd = "."
 startup_timeout_sec = 20
 required = false
@@ -120,8 +121,8 @@ For Claude Code, add a project `.mcp.json`:
 {
   "mcpServers": {
     "chapter-mcp": {
-      "command": "/absolute/path/to/chapter-mcp/.venv/bin/chapter-mcp",
-      "args": ["--root", "${CLAUDE_PROJECT_DIR:-.}"]
+      "command": "uvx",
+      "args": ["chapter-mcp", "--root", "${CLAUDE_PROJECT_DIR:-.}"]
     }
   }
 }
@@ -130,7 +131,7 @@ For Claude Code, add a project `.mcp.json`:
 Or add it through Claude's MCP command:
 
 ```sh
-claude mcp add-json chapter-mcp '{"command":"/absolute/path/to/chapter-mcp/.venv/bin/chapter-mcp","args":["--root","${CLAUDE_PROJECT_DIR:-.}"]}'
+claude mcp add-json chapter-mcp '{"command":"uvx","args":["chapter-mcp","--root","${CLAUDE_PROJECT_DIR:-.}"]}'
 ```
 
 Then add instructions in `CLAUDE.md`:
@@ -192,10 +193,12 @@ a small search over indexed chapters instead of a broad file read.
 Recommended flow:
 
 1. Search local instructions and docs with `chapter-mcp`.
-2. Read the best chapter with `read_search` or `read_chapter`.
+2. Read the best chapter with `read_search(..., content_limit=40)` or
+   `read_chapter(..., content_limit=40)`.
 3. Switch to symbol tools if the task becomes code-aware.
 4. Use `rg` for exact verification.
-5. Use raw reads only after the path and range are clear.
+5. If you know a file and line, try `read_chapter_at` before a raw range read.
+6. Use raw reads only after the path and range are clear.
 
 This is especially useful when pairing `chapter-mcp` with tools such as Serena:
 
@@ -216,7 +219,8 @@ source sections.
 Use `read_chapter` with `content_limit` for focused reads. Use `rg` for exact
 literals and Serena/language tools for symbols and references. If you want code
 or config hits to contain the raw query exactly, pass `exact_code_matches=true`
-to `search` or `read_search`.
+to `search` or `read_search`. If you know a file and approximate line, use
+`read_chapter_at` before reading a raw line range.
 ```
 
 ## Compared with file-read-mcp
@@ -238,13 +242,17 @@ The distinction is small but important. `file-read-mcp` is about access.
 
 ## MCP tools
 
-The server exposes `search`, `search_chapter`, `read_search`, `read_chapter`,
-`list_chapters`, `list_chapters_as_columns`, `list_files`, `stats`, and
-`reindex`.
+The server exposes `search`, `search_chapter`, `read_search`,
+`read_chapter_at`, `read_chapter`, `list_chapters`,
+`list_chapters_as_columns`, `list_files`, `stats`, and `reindex`.
 
 `search` and `read_search` also accept `exact_code_matches=false`. When set to
 `true`, docs keep normal FTS behavior, but code/config chapters must contain the
 raw query as an exact substring.
+
+`read_search`, `read_chapter_at`, and `read_chapter` accept `content_limit` for
+small first reads. `read_chapter_at` is useful when the alternative would be a
+raw line-range read and you want the indexed chapter around that line first.
 
 Example calls:
 
@@ -254,7 +262,8 @@ list_files()
 search("config handling", limit=3, include_snippet=True)
 search("extract-codex-session", exact_code_matches=True)
 search_chapter("Style guide", category="docs", limit=3)
-read_search("config handling", category="docs")
+read_search("config handling", category="docs", content_limit=40)
+read_chapter_at(file="docs/style-guide.md", line=25, content_limit=40)
 read_chapter("Style guide", file="docs/style-guide.md", content_limit=40)
 list_chapters_as_columns(fields=["name"])
 ```

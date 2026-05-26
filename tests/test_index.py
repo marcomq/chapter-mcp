@@ -322,6 +322,25 @@ def test_read_search_returns_full_chapter_for_title_and_content_matches(tmp_path
         index.close()
 
 
+def test_read_search_can_limit_content(tmp_path: Path) -> None:
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\none\ntwo\nthree\n")
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_search("alpha", content_limit=2)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["content"] == "# Alpha\none"
+        assert first_chapter(chapter)["content_offset"] == 0
+        assert first_chapter(chapter)["content_total_lines"] == 4
+        assert first_chapter(chapter)["content_truncated"] is True
+
+        with pytest.raises(ValueError, match="content_limit must be greater than zero"):
+            index.read_search("alpha", content_limit=0)
+    finally:
+        index.close()
+
+
 def test_read_chapter_can_slice_content_by_lines(tmp_path: Path) -> None:
     write(
         tmp_path / "docs" / "alpha.py",
@@ -352,6 +371,30 @@ def test_read_chapter_content_slice_can_return_tail_without_truncation_when_exac
         assert first_chapter(chapter)["content_offset"] == 2
         assert first_chapter(chapter)["content_total_lines"] == 3
         assert first_chapter(chapter)["content_truncated"] is True
+    finally:
+        index.close()
+
+
+def test_read_chapter_at_returns_chapter_containing_line(tmp_path: Path) -> None:
+    write(
+        tmp_path / "docs" / "guide.md",
+        "# Intro\nWelcome.\n\n## Setup\nInstall it.\nConfigure it.\n\n## Usage\nRun it.\n",
+    )
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3", category_paths=["docs"])
+
+    try:
+        index.reindex()
+        chapter = index.read_chapter_at("docs/guide.md", line=5, content_limit=2)
+        assert chapter["count"] == 1
+        assert first_chapter(chapter)["name"] == "Intro > Setup"
+        assert first_chapter(chapter)["start_line"] == 4
+        assert first_chapter(chapter)["end_line"] == 7
+        assert first_chapter(chapter)["content"] == "## Setup\nInstall it."
+        assert first_chapter(chapter)["content_truncated"] is True
+
+        assert index.read_chapter_at("docs/guide.md", line=20) == {"count": 0, "results": []}
+        with pytest.raises(ValueError, match="content_limit must be greater than zero"):
+            index.read_chapter_at("docs/guide.md", line=5, content_limit=0)
     finally:
         index.close()
 

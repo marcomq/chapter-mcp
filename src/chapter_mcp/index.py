@@ -389,10 +389,13 @@ class ChapterIndex:
         query: str,
         category: str | None = None,
         offset: int = 0,
+        content_limit: int | None = None,
         exact_code_matches: bool = False,
     ) -> ReadChapterResponse:
-        """Return the full chapter content for the ranked search match at the given offset."""
+        """Return chapter content for the ranked search match at the given offset."""
         offset = max(0, offset)
+        if content_limit is not None and content_limit < 1:
+            raise ValueError("content_limit must be greater than zero")
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
         matches = self._search_fts(
@@ -409,11 +412,57 @@ class ChapterIndex:
         category = match["category"]
         file_record = match["files"][0]
         chapter_record = file_record["chapters"][0]
-        chapter = self.read_chapter(chapter_record["name"], file=file_record["file"], category=category, count=1, offset=0)
+        chapter = self.read_chapter(
+            chapter_record["name"],
+            file=file_record["file"],
+            category=category,
+            count=1,
+            offset=0,
+            content_limit=content_limit,
+        )
         return {
             "count": matches["count"],
             "results": chapter["results"],
         }
+
+    def read_chapter_at(
+        self,
+        file: str,
+        line: int,
+        category: str | None = None,
+        content_limit: int | None = None,
+    ) -> ReadChapterResponse:
+        """Return the indexed chapter containing a file line, optionally narrowed by category."""
+        line = max(1, line)
+        if content_limit is not None and content_limit < 1:
+            raise ValueError("content_limit must be greater than zero")
+        if category is not None and category not in self.category_dirs:
+            raise ValueError(f"unknown category: {category}")
+        clauses = ["file_path = ?", "start_line <= ?", "end_line >= ?"]
+        params: list[Any] = [file, line, line]
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(category)
+        where = " and ".join(clauses)
+        with self._lock:
+            rows = self.db.execute(
+                f"""
+                select file_path, category, chunk_type, chunk_name, content, start_line, end_line
+                from chunks
+                where {where}
+                order by category, file_path, start_line
+                limit 1
+                """,
+                params,
+            ).fetchall()
+            return {
+                "count": len(rows),
+                "results": _group_chapter_rows(
+                    rows,
+                    include_content=True,
+                    content_limit=content_limit,
+                ),
+            }
 
     def read_chapter(
         self,
