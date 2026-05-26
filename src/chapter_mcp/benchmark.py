@@ -42,6 +42,8 @@ def load_records(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected an object")
             if "tool" not in raw or "chars_out" not in raw:
                 raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected tool and chars_out")
+            if raw["chars_out"] is None:
+                raise ValueError(f"invalid JSONL in {path} on line {line_number}: expected tool and chars_out")
             raw["tool"] = str(raw["tool"])
             for key in ("chars_out", "bytes_out", "lines_out"):
                 if key not in raw or raw[key] is None:

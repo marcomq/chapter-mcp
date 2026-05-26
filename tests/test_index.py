@@ -701,6 +701,15 @@ def test_ignore_matcher_reload_rules_after_ignore_file_changes(tmp_path: Path) -
     assert matcher.matches(ignored_path, tmp_path) is False
 
 
+def test_directory_only_basename_rule_matches_named_directory_and_descendants() -> None:
+    assert _matches_ignore_rule(
+        pattern="ignored",
+        relative_path="ignored/secret.md",
+        anchored=False,
+        directory_only=True,
+    ) is True
+
+
 def test_anchored_basename_rule_does_not_match_parent_directory_names() -> None:
     assert _matches_ignore_rule(
         pattern="keep",
@@ -708,6 +717,30 @@ def test_anchored_basename_rule_does_not_match_parent_directory_names() -> None:
         anchored=True,
         directory_only=False,
     ) is False
+
+
+def test_reindex_prunes_ignored_directories_before_recursing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(tmp_path / ".gitignore", "node_modules/\n")
+    write(tmp_path / "docs" / "alpha.md", "# Alpha\nVisible note.")
+    write(tmp_path / "node_modules" / "pkg" / "secret.md", "# Secret\nIgnored note.")
+
+    index = ChapterIndex(tmp_path, tmp_path / ".chapter-mcp" / "index.sqlite3")
+    original_scandir = os.scandir
+
+    def fail_on_node_modules(path: os.PathLike[str] | str) -> os.ScandirIterator[str]:
+        if Path(path).name == "node_modules":
+            raise AssertionError("unexpected recursion into ignored directory")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", fail_on_node_modules)
+
+    try:
+        stats = index.reindex()
+        assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
+        assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
+        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+    finally:
+        index.close()
 
 
 def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:

@@ -113,7 +113,7 @@ def _matches_ignore_rule(*, pattern: str, relative_path: str, anchored: bool, di
         basename_candidates.extend(directory.name for directory in normalized_path.parents if directory.name)
         basename_scope = basename_candidates[:1] if anchored else basename_candidates
         if directory_only:
-            return any(fnmatch.fnmatchcase(name, pattern) for name in basename_scope[1 if not anchored else 0 :])
+            return any(fnmatch.fnmatchcase(name, pattern) for name in basename_scope)
         return any(fnmatch.fnmatchcase(name, pattern) for name in basename_scope)
 
     if directory_only:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -1050,10 +1051,7 @@ class ChapterIndex:
                 if not self._should_skip_path(category_root, category_root):
                     files.append((category_root, category_root))
                 continue
-            for path in sorted(category_root.rglob("*")):
-                if not path.is_file() or self._should_skip_path(path, category_root):
-                    continue
-                files.append((path, category_root))
+            files.extend((path, category_root) for path in self._iter_files_in_dir(category_root, category_root))
         return files
 
     def _configured_paths_overlap(self, directory: Path, existing_directory: Path) -> bool:
@@ -1073,6 +1071,43 @@ class ChapterIndex:
         if category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
         return (category,)
+
+    def _iter_files_in_dir(self, directory: Path, category_dir: Path) -> list[Path]:
+        files: list[Path] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in sorted(entries, key=lambda item: item.name):
+                    path = Path(entry.path)
+                    if entry.is_dir():
+                        if self._should_skip_dir(path, category_dir):
+                            continue
+                        files.extend(self._iter_files_in_dir(path, category_dir))
+                        continue
+                    if not entry.is_file() or self._should_skip_path(path, category_dir):
+                        continue
+                    files.append(path)
+        except OSError:
+            return files
+        return files
+
+    def _should_skip_dir(self, path: Path, category_dir: Path) -> bool:
+        if category_dir.is_file():
+            rel_parts = (path.name,)
+        else:
+            try:
+                rel_parts = path.relative_to(category_dir).parts
+            except ValueError:
+                return True
+        if any(part.startswith(".") for part in rel_parts):
+            return True
+        if self._gitignore_matcher.matches(path, category_dir):
+            return True
+        if self._aiignore_matcher.matches(path, category_dir):
+            return True
+        try:
+            return path.resolve() == self.db_path.resolve()
+        except OSError:
+            return True
 
     def _should_skip_path(self, path: Path, category_dir: Path) -> bool:
         if category_dir.is_file():

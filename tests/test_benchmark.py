@@ -155,6 +155,14 @@ def test_load_records_rejects_negative_output_counters(tmp_path: Path, field: st
         load_records(log_path)
 
 
+def test_load_records_rejects_null_chars_out(tmp_path: Path) -> None:
+    log_path = tmp_path / "invalid.jsonl"
+    write_jsonl(log_path, [{"tool": "rg", "chars_out": None, "bytes_out": None, "lines_out": None}])
+
+    with pytest.raises(ValueError, match=r"expected tool and chars_out"):
+        load_records(log_path)
+
+
 def test_extract_codex_session_to_jsonl_normalizes_exec_and_mcp_tools(tmp_path: Path) -> None:
     session_log = tmp_path / "session.jsonl"
     session_log.write_text(

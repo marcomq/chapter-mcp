@@ -13,3 +13,12 @@ approval_mode = "approve"
 
 [mcp_servers.chapter-mcp.tools.list_files]
 approval_mode = "approve"
+
+[mcp_servers.chapter-mcp.tools.search]
+approval_mode = "approve"
+
+[mcp_servers.chapter-mcp.tools.read_chapter]
+approval_mode = "approve"
+
+[mcp_servers.chapter-mcp.tools.read_search]
+approval_mode = "approve"
