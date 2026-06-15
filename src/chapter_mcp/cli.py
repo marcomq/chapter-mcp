@@ -112,6 +112,7 @@ def _load_project_config(config_path: Path) -> dict[str, Any]:
         "root": _resolve_optional_path(data.get("root"), field_name="root", base_dir=base_dir),
         "db": _resolve_optional_path(data.get("db"), field_name="db", base_dir=base_dir),
         "paths": _resolve_paths(data.get("paths"), config_path=config_path),
+        "index": _resolve_bool(data.get("index"), field_name="index"),
         "watch": _resolve_bool(data.get("watch"), field_name="watch"),
         "watch_interval": watch_interval,
         "sync_startup": _resolve_bool(data.get("sync_startup"), field_name="sync_startup"),
@@ -155,12 +156,17 @@ def _serve(argv: list[str]) -> None:
         "--watch-interval",
         type=_validate_positive_float,
         default=None,
-        help="Seconds between filesystem change checks. Defaults to 1.0 unless overridden by project config.",
+        help="Seconds between filesystem change checks. Defaults to 60.0 unless overridden by project config.",
     )
     parser.add_argument(
         "--no-watch",
         action="store_true",
         help="Disable automatic background reindexing.",
+    )
+    parser.add_argument(
+        "--no-index",
+        action="store_true",
+        help="Disable all file scanning: skip the startup index and the background watcher.",
     )
     sync_group = parser.add_mutually_exclusive_group()
     sync_group.add_argument(
@@ -195,10 +201,14 @@ def _serve(argv: list[str]) -> None:
 
     paths = args.paths if args.paths else (config["paths"] if config is not None else None)
 
+    index_on_startup = config["index"] if config and config["index"] is not None else True
     watch = False if args.no_watch else (config["watch"] if config and config["watch"] is not None else True)
+    if args.no_index:
+        index_on_startup = False
+        watch = False
     watch_interval = args.watch_interval
     if watch_interval is None:
-        watch_interval = config["watch_interval"] if config and config["watch_interval"] is not None else 1.0
+        watch_interval = config["watch_interval"] if config and config["watch_interval"] is not None else 60.0
     sync_startup = args.sync_startup
     if sync_startup is None:
         sync_startup = config["sync_startup"] if config and config["sync_startup"] is not None else True
@@ -207,6 +217,7 @@ def _serve(argv: list[str]) -> None:
         root=effective_root,
         db_path=effective_db,
         paths=paths,
+        index_on_startup=index_on_startup,
         async_startup=not sync_startup,
         watch=watch,
         watch_interval=watch_interval,

@@ -169,9 +169,10 @@ paths:
 }
 ```
 
-Supported config fields are `root`, `db`, `paths`, `watch`, `watch_interval`,
-and `sync_startup`. `paths` is required when using config. CLI flags override
-project config when both are present.
+Supported config fields are `root`, `db`, `paths`, `index`, `watch`,
+`watch_interval`, and `sync_startup`. `paths` is required when using config.
+Set `index` to `false` to disable file scanning entirely (no startup index and
+no background watcher). CLI flags override project config when both are present.
 
 Useful server flags:
 
@@ -180,6 +181,7 @@ chapter-mcp --root .
 chapter-mcp --root . --path docs --path src
 chapter-mcp --root . --path knowledge=.serena/memories
 chapter-mcp --root . --no-watch
+chapter-mcp --root . --no-index
 chapter-mcp --root . --no-sync-startup
 chapter-mcp --root . --watch-interval 0.5
 ```

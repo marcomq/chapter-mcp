@@ -88,7 +88,7 @@ def test_index_reindex_search_read_chapter_list_chapters_and_cleanup(tmp_path: P
 
         files = index.list_files()
         assert files["count"] == 2
-        alpha_file = next(file for file in files["files"] if file["file"] == "knowledge/alpha.md")
+        alpha_file = next(file for file in files["results"] if file["file"] == "knowledge/alpha.md")
         assert alpha_file["chapters"] == 1
 
         stats = index.stats()
@@ -102,7 +102,7 @@ def test_index_reindex_search_read_chapter_list_chapters_and_cleanup(tmp_path: P
         assert stats["categories"]["knowledge"]["latest_mtime"] is not None
         assert stats["last_indexing_summary"]["chapters_loaded"] == 0
 
-        chapters = index.list_chapters(count=1)
+        chapters = index.list_chapters(limit=1)
         assert chapters["count"] == 2
         assert chapters["offset"] == 0
         assert first_chapter(chapters)["name"] == "paragraph-1"
@@ -113,7 +113,7 @@ def test_index_reindex_search_read_chapter_list_chapters_and_cleanup(tmp_path: P
         assert first_chapter(chapter)["content"] == "# Alpha\nUseful search notes."
 
         missing = index.read_chapter("Missing", file="knowledge/alpha.md")
-        assert missing == {"count": 0, "results": []}
+        assert missing == {"count": 0, "offset": 0, "limit": 5, "truncated": False, "results": []}
 
         (tmp_path / "examples" / "beta.txt").unlink()
         cleanup = index.reindex("examples")
@@ -182,7 +182,7 @@ def test_list_chapters_as_columns_uses_default_fields_and_preserves_truncated(tm
 
     try:
         index.reindex()
-        result = index.list_chapters_as_columns(count=1)
+        result = index.list_chapters_as_columns(limit=1)
         assert first_column_file(result)["columns"] == ["name", "start_line", "end_line"]
         assert first_column_file(result)["rows"] == [["Alpha", 1, 2]]
         assert first_column_file(result)["file"] == "docs/alpha.md"
@@ -264,7 +264,7 @@ def test_search_chapter_searches_chapter_names_only(tmp_path: Path) -> None:
         assert "content" not in first_chapter(results)
 
         no_content_match = index.search_chapter("shell", limit=5)
-        assert no_content_match == {"count": 0, "results": []}
+        assert no_content_match == {"count": 0, "offset": 0, "limit": 5, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -599,7 +599,7 @@ def test_multiple_paths_can_share_one_category(tmp_path: Path) -> None:
         result = index.search("workflow", category="instructions", limit=1)
         assert first_file(result)["file"] == "internal_instructions.md"
         listed = index.list_files(category="instructions")
-        assert {item["file"] for item in listed["files"]} == {"README.md", "internal_instructions.md"}
+        assert {item["file"] for item in listed["results"]} == {"README.md", "internal_instructions.md"}
         category_stats = index.stats()["categories"]["instructions"]
         assert "path" not in category_stats
         assert category_stats["paths"] == [
@@ -619,7 +619,7 @@ def test_no_configured_paths_indexes_visible_project_files(tmp_path: Path) -> No
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("alpha", limit=1))["file"] == "knowledge/alpha.md"
-        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+        assert index.search("secret", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -635,7 +635,7 @@ def test_default_indexing_respects_gitignore(tmp_path: Path) -> None:
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
-        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+        assert index.search("secret", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -651,7 +651,7 @@ def test_nested_gitignore_can_reinclude_files(tmp_path: Path) -> None:
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
-        assert index.search("draft", limit=1) == {"count": 0, "results": []}
+        assert index.search("draft", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -667,7 +667,7 @@ def test_default_indexing_respects_aiignore(tmp_path: Path) -> None:
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
-        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+        assert index.search("secret", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -683,7 +683,7 @@ def test_nested_aiignore_can_reinclude_files(tmp_path: Path) -> None:
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("keep", limit=1))["file"] == "docs/keep.md"
-        assert index.search("draft", limit=1) == {"count": 0, "results": []}
+        assert index.search("draft", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -738,7 +738,7 @@ def test_reindex_prunes_ignored_directories_before_recursing(tmp_path: Path, mon
         stats = index.reindex()
         assert stats.as_dict() == {"scanned": 1, "indexed": 1, "skipped": 0, "deleted": 0}
         assert first_file(index.search("alpha", limit=1))["file"] == "docs/alpha.md"
-        assert index.search("secret", limit=1) == {"count": 0, "results": []}
+        assert index.search("secret", limit=1) == {"count": 0, "offset": 0, "limit": 1, "truncated": False, "results": []}
     finally:
         index.close()
 
@@ -752,13 +752,13 @@ def test_create_app_starts_indexing_in_background(tmp_path: Path) -> None:
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             listed = app.chapter_index.list_files()  # type: ignore[attr-defined]
-            if listed["files"]:
+            if listed["results"]:
                 break
             time.sleep(0.02)
         else:
             raise AssertionError("file metadata was not available before indexing finished")
-        assert listed["files"][0]["file"] == "docs/alpha.md"
-        assert listed["files"][0]["chapters"] == 1
+        assert listed["results"][0]["file"] == "docs/alpha.md"
+        assert listed["results"][0]["chapters"] == 1
         stats = app.chapter_index.stats()  # type: ignore[attr-defined]
         assert stats["startup_index_running"] is True or stats["last_reindex"] is not None
         app.chapter_index.wait_for_startup(timeout=2)  # type: ignore[attr-defined]
@@ -789,7 +789,7 @@ def test_prepare_failure_does_not_commit_partial_file_metadata(tmp_path: Path, m
     try:
         with pytest.raises(RuntimeError, match="boom"):
             index.reindex()
-        assert index.list_files()["files"] == []
+        assert index.list_files()["results"] == []
         assert index.has_changes() is True
     finally:
         index.close()

@@ -83,25 +83,34 @@ class FileRecord(TypedDict):
 
 class SearchResponse(TypedDict):
     count: int
+    offset: int
+    limit: int
+    truncated: bool
     results: list[CategoryChapterRecord]
 
 
 class ChapterListResponse(TypedDict):
     count: int
     offset: int
+    limit: int
+    truncated: bool
     results: list[CategoryChapterRecord]
 
 
 class ReadChapterResponse(TypedDict):
     count: int
+    offset: NotRequired[int]
+    limit: NotRequired[int]
+    truncated: NotRequired[bool]
     results: list[CategoryChapterRecord]
 
 
 class ChapterColumnsResponse(TypedDict):
     count: int
     offset: int
-    results: list["CategoryChapterColumnsRecord"]
+    limit: int
     truncated: bool
+    results: list["CategoryChapterColumnsRecord"]
 
 
 class FileChapterColumnsRecord(TypedDict):
@@ -117,9 +126,10 @@ class CategoryChapterColumnsRecord(TypedDict):
 
 class FileListResponse(TypedDict):
     count: int
-    limit: int
     offset: int
-    files: list[FileRecord]
+    limit: int
+    truncated: bool
+    results: list[FileRecord]
 
 
 class CategoryStats(TypedDict):
@@ -263,7 +273,7 @@ class ChapterIndex:
         if thread is not None:
             thread.join(timeout=timeout)
 
-    def start_watcher(self, interval: float = 1.0) -> None:
+    def start_watcher(self, interval: float = 60.0) -> None:
         """Start the background watcher that periodically reindexes changed files."""
         if interval <= 0:
             raise ValueError("watch interval must be greater than zero")
@@ -411,7 +421,7 @@ class ChapterIndex:
             chapter_record["name"],
             file=file_record["file"],
             category=category,
-            count=1,
+            limit=1,
             offset=0,
             content_limit=content_limit,
         )
@@ -464,13 +474,13 @@ class ChapterIndex:
         chapter_name: str,
         file: str | None = None,
         category: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
         content_offset: int = 0,
         content_limit: int | None = None,
     ) -> ReadChapterResponse:
         """Return chapter records for an exact chapter name, optionally narrowed by file or category."""
-        count = max(1, min(count, 100))
+        limit = max(1, min(limit, 100))
         offset = max(0, offset)
         content_offset = max(0, content_offset)
         if content_limit is not None and content_limit < 1:
@@ -496,10 +506,14 @@ class ChapterIndex:
                 order by category, file_path, start_line
                 limit ? offset ?
                 """,
-                [*params, count, offset],
+                [*params, limit, offset],
             ).fetchall()
+            total_count = count_row["count"] if count_row is not None else 0
             return {
-                "count": count_row["count"] if count_row is not None else 0,
+                "count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "truncated": offset + len(rows) < total_count,
                 "results": _group_chapter_rows(
                     rows,
                     include_content=True,
@@ -512,11 +526,11 @@ class ChapterIndex:
         self,
         category: str | None = None,
         file: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
     ) -> ChapterListResponse:
         """List indexed chapters with names, files, and line ranges but without full content."""
-        count = max(1, min(count, 100))
+        limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
@@ -539,11 +553,14 @@ class ChapterIndex:
                 order by category, file_path, start_line
                 limit ? offset ?
                 """,
-                [*params, count, offset],
+                [*params, limit, offset],
             ).fetchall()
+            total_count = count_row["count"] if count_row is not None else 0
             return {
-                "count": count_row["count"] if count_row is not None else 0,
+                "count": total_count,
                 "offset": offset,
+                "limit": limit,
+                "truncated": offset + len(rows) < total_count,
                 "results": _group_chapter_rows(rows, include_content=False),
             }
 
@@ -551,12 +568,12 @@ class ChapterIndex:
         self,
         category: str | None = None,
         file: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
         fields: Sequence[str] | None = None,
     ) -> ChapterColumnsResponse:
         """List indexed chapters as compact column-oriented rows."""
-        count = max(1, min(count, 100))
+        limit = max(1, min(limit, 100))
         offset = max(0, offset)
         if category is not None and category not in self.category_dirs:
             raise ValueError(f"unknown category: {category}")
@@ -592,14 +609,15 @@ class ChapterIndex:
                 order by category, file_path, start_line
                 limit ? offset ?
                 """,
-                [*params, count, offset],
+                [*params, limit, offset],
             ).fetchall()
             total_count = count_row["count"] if count_row is not None else 0
             return {
                 "count": total_count,
                 "offset": offset,
-                "results": _group_chapter_column_rows(rows, fields=selected_fields),
+                "limit": limit,
                 "truncated": offset + len(rows) < total_count,
+                "results": _group_chapter_column_rows(rows, fields=selected_fields),
             }
 
     def list_files(self, category: str | None = None, limit: int = 100, offset: int = 0) -> FileListResponse:
@@ -609,7 +627,7 @@ class ChapterIndex:
         with self._lock:
             categories = self._selected_categories(category)
             if not categories:
-                return {"count": 0, "limit": limit, "offset": offset, "files": []}
+                return {"count": 0, "offset": offset, "limit": limit, "truncated": False, "results": []}
             placeholders = ",".join("?" for _ in categories)
             count_row = self.db.execute(
                 f"select count(*) as count from files where category in ({placeholders})",
@@ -629,11 +647,13 @@ class ChapterIndex:
                 """,
                 [*categories, limit, offset],
             ).fetchall()
+            total_count = count_row["count"] if count_row is not None else 0
             return {
-                "count": count_row["count"] if count_row is not None else 0,
-                "limit": limit,
+                "count": total_count,
                 "offset": offset,
-                "files": [_file_row_to_result(row) for row in rows],
+                "limit": limit,
+                "truncated": offset + len(rows) < total_count,
+                "results": [_file_row_to_result(row) for row in rows],
             }
 
     def stats(self) -> StatsResponse:
@@ -838,8 +858,12 @@ class ChapterIndex:
                 """,
                 [match_expression, category, category, *exact_params, limit, offset],
             ).fetchall()
+            total_count = count_row["count"] if count_row is not None else 0
             return {
-                "count": count_row["count"] if count_row is not None else 0,
+                "count": total_count,
+                "offset": offset,
+                "limit": limit,
+                "truncated": offset + len(rows) < total_count,
                 "results": _group_chapter_rows(rows, include_content=False),
             }
 
@@ -849,7 +873,7 @@ class ChapterIndex:
             for file_result in category_result["files"]:
                 file = file_result["file"]
                 for chapter_result in file_result["chapters"]:
-                    chapter = self.read_chapter(chapter_result["name"], file=file, category=category, count=1, offset=0)
+                    chapter = self.read_chapter(chapter_result["name"], file=file, category=category, limit=1, offset=0)
                     if not chapter["results"]:
                         continue
                     content = chapter["results"][0]["files"][0]["chapters"][0].get("content")

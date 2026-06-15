@@ -25,7 +25,7 @@ def create_app(
     index_on_startup: bool = True,
     async_startup: bool = True,
     watch: bool = True,
-    watch_interval: float = 1.0,
+    watch_interval: float = 60.0,
 ) -> FastMCP:
     """Create a FastMCP app wired to a ChapterIndex and the standard search/list/reindex tools."""
     root_path = (root or Path.cwd()).expanduser().resolve()
@@ -101,7 +101,7 @@ def create_app(
         chapter_name: str,
         file: str | None = None,
         category: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
         content_offset: int = 0,
         content_limit: int | None = None,
@@ -114,7 +114,7 @@ def create_app(
             chapter_name=chapter_name,
             file=file,
             category=category,
-            count=count,
+            limit=limit,
             offset=offset,
             content_offset=content_offset,
             content_limit=content_limit,
@@ -124,17 +124,17 @@ def create_app(
     def list_chapters(
         category: str | None = None,
         file: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
     ) -> ChapterListResponse:
         """List indexed chapter names and line ranges before reading content."""
-        return chapter_index.list_chapters(category=category, file=file, count=count, offset=offset)
+        return chapter_index.list_chapters(category=category, file=file, limit=limit, offset=offset)
 
     @mcp.tool
     def list_chapters_as_columns(
         category: str | None = None,
         file: str | None = None,
-        count: int = 5,
+        limit: int = 5,
         offset: int = 0,
         fields: Sequence[str] | None = None,
     ) -> ChapterColumnsResponse:
@@ -142,7 +142,7 @@ def create_app(
         return chapter_index.list_chapters_as_columns(
             category=category,
             file=file,
-            count=count,
+            limit=limit,
             offset=offset,
             fields=fields,
         )

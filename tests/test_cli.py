@@ -50,6 +50,50 @@ def test_cli_rejects_non_positive_watch_interval(monkeypatch, tmp_path: Path) ->
     assert exc_info.value.code == 2
 
 
+def test_cli_no_index_disables_startup_and_watch(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path), "--path", "docs", "--no-index"],
+    )
+
+    cli.main()
+
+    assert captured["index_on_startup"] is False
+    assert captured["watch"] is False
+
+
+def test_cli_index_false_in_project_config_disables_scanning(monkeypatch, tmp_path: Path) -> None:
+    app = FakeApp()
+    captured: dict[str, object] = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return app
+
+    (tmp_path / ".chapter-mcp").mkdir()
+    (tmp_path / ".chapter-mcp" / "config.json").write_text(
+        json.dumps({"paths": ["docs"], "index": False})
+    )
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["chapter-mcp", "--root", str(tmp_path)],
+    )
+
+    cli.main()
+
+    assert captured["index_on_startup"] is False
+
+
 def test_cli_loads_paths_from_CHAPTER_MCP_CFG(monkeypatch, tmp_path: Path) -> None:
     app = FakeApp()
     captured: dict[str, object] = {}
